@@ -1,0 +1,401 @@
+{
+  "name": "LINE Weather Bot",
+  "nodes": [
+    {
+      "id": "5b242101-743d-463b-9f9e-ab5e96815220",
+      "name": "LINE Raw Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "line-weather",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "7c844a21-15ab-4735-8c75-3964f7ff4d17"
+    },
+    {
+      "id": "cff7cb8b-909f-4393-ad35-b19894ed36f3",
+      "name": "Verify and Persist",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "x-line-signature",
+              "value": "={{ $json.headers['x-line-signature'] ?? '' }}"
+            },
+            {
+              "name": "x-received-at",
+              "value": "={{ $json.headers['x-received-at'] ?? '' }}"
+            },
+            {
+              "name": "x-received-proof",
+              "value": "={{ $json.headers['x-received-proof'] ?? '' }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "url": "http://127.0.0.1:5682/ingress",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 100,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "QfBL2OVotmdDCjuI",
+          "name": "LINE n8n Internal"
+        }
+      }
+    },
+    {
+      "id": "54eb37be-0db5-45ac-936f-3be4423e3646",
+      "name": "Return Verified Status",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}"
+        }
+      }
+    },
+    {
+      "id": "182bf6fb-1793-4d63-b285-ca4222b636dc",
+      "name": "Process Chat Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 295000
+        },
+        "url": "http://127.0.0.1:5682/jobs/chats"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "QfBL2OVotmdDCjuI",
+          "name": "LINE n8n Internal"
+        }
+      }
+    },
+    {
+      "id": "c2ae19f6-fb8d-4324-8612-02e05c9029e2",
+      "name": "Adapter Unavailable",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        520,
+        220
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"error\":\"adapter_unavailable\"}",
+        "options": {
+          "responseCode": 503
+        }
+      }
+    },
+    {
+      "id": "6bd363f6-36f2-4ec5-a631-5f2cbf147b4f",
+      "name": "Recover Pending Chats",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        520,
+        -240
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "e0e75071-44cd-42a9-b47d-2b0ec681eff0",
+      "name": "Background Every Second",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        440
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 1
+            }
+          ]
+        }
+      },
+      "disabled": false
+    },
+    {
+      "id": "4275038e-3b4d-4a1f-b1a4-3224663f8912",
+      "name": "Weather Outbox and Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        350,
+        540
+      ],
+      "parameters": {
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 295000
+        },
+        "url": "http://127.0.0.1:5682/jobs/background"
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 100,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "QfBL2OVotmdDCjuI",
+          "name": "LINE n8n Internal"
+        }
+      }
+    },
+    {
+      "id": "cc3c54c6-294a-4108-8b69-a3daad59d1c1",
+      "name": "Run Background Tick",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        680
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "line-weather-tick",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "webhookId": "a75496cc-99d8-41af-a9c6-eabd113667e7",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "QfBL2OVotmdDCjuI",
+          "name": "LINE n8n Internal"
+        }
+      }
+    },
+    {
+      "id": "7b6d8599-1e4b-461d-bf2a-2f8fa082a12b",
+      "name": "Workflow Failed",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        940
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "267b1492-fd32-4cf4-8830-ee1dd265e088",
+      "name": "Save Sanitized Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        350,
+        940
+      ],
+      "parameters": {
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 295000
+        },
+        "url": "http://127.0.0.1:5682/errors",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { workflow_id: $json.workflow.id, execution_id: $json.execution.id, node: $json.execution.lastNodeExecuted } }}"
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "QfBL2OVotmdDCjuI",
+          "name": "LINE n8n Internal"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "LINE Raw Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify and Persist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify and Persist": {
+      "main": [
+        [
+          {
+            "node": "Return Verified Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Adapter Unavailable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Verified Status": {
+      "main": [
+        [
+          {
+            "node": "Process Chat Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recover Pending Chats": {
+      "main": [
+        [
+          {
+            "node": "Process Chat Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Background Every Second": {
+      "main": [
+        [
+          {
+            "node": "Weather Outbox and Memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Background Tick": {
+      "main": [
+        [
+          {
+            "node": "Weather Outbox and Memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Workflow Failed": {
+      "main": [
+        [
+          {
+            "node": "Save Sanitized Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "timezone": "Asia/Taipei",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "executionTimeout": 300
+  },
+  "active": false
+}
