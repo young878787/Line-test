@@ -1,0 +1,73 @@
+name: Bot acceptance
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Run bounded CWA/BIRC checks (no LINE delivery)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.24"
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run python -m compileall -q src tests
+      - run: uv run python -m pytest -q --junitxml=logs/ci/junit.xml
+      - name: Show five-turn mock transcript
+        if: always()
+        shell: bash
+        run: |
+          if [ -f logs/ci/chat_five_turns.md ]; then
+            cat logs/ci/chat_five_turns.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-${{ matrix.os }}
+          path: logs/ci/
+  live:
+    if: github.event_name == 'workflow_dispatch' && inputs.live && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.24"
+          python-version: "3.12"
+      - run: uv sync --locked --group dev
+      - run: uv run python -m pytest tests/live -q --live --junitxml=logs/ci/junit.xml
+        env:
+          CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
+          AI_API_Keys: ${{ secrets.AI_API_KEYS }}
+          AI_API_URL: ${{ secrets.AI_API_URL }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+      - name: Show AI onboarding and five-turn transcripts
+        if: always()
+        shell: bash
+        run: |
+          if [ -f logs/live/chat_five_turns.md ]; then
+            cat logs/live/chat_five_turns.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f logs/live/onboarding.md ]; then
+            cat logs/live/onboarding.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-acceptance
+          path: logs/

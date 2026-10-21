@@ -1,0 +1,34 @@
+# 本機環境與資料庫設定（測試環境例外）
+.env
+.env.*
+!.env.example
+!.env.test
+!.env.test.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# uv 虛擬環境
+.venv/
+.tools/
+
+# Codex／本機代理工具資料
+.agents/
+
+# 本機資料庫
+bot.sqlite3
+bot.sqlite3-wal
+bot.sqlite3-shm
+logs/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
