@@ -14,7 +14,8 @@ async def test_T02_scheduled_morning_without_new_forecast_six_sentences_once(bot
     payload = json.loads(rows[0]["payload"])
     assert len(payload["messages"]) == 1
     assert len(payload["messages"][0]["text"].split("\n\n")[0].splitlines()) == 6
-    assert "新北市板橋區" in payload["messages"][0]["text"]
+    assert "新北市" in payload["messages"][0]["text"]
+    assert "板橋區" not in payload["messages"][0]["text"] and "None" not in payload["messages"][0]["text"]
     assert "23°C" in payload["messages"][0]["text"]
     bot.clock.advance(600)
     await bot.tick()

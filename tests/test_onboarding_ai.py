@@ -7,7 +7,7 @@ import pytest
 
 from conftest import chat, configured
 from weather_bot.db import Database, SCHEMA
-from weather_bot.onboarding import validate_change
+from weather_bot.onboarding import onboarding_reminder, validate_change
 from weather_bot.schemas import SetupChange
 
 
@@ -36,7 +36,7 @@ async def test_mixed_setup_keeps_partial_values_confirms_preferences_and_opens_c
             return [change(k, v, message, q) for k, v, q in (
                 ("city", "新北市", "新北市"), ("wake_time", "07:30", "7.30起床"),
                 ("persona.address_user_as", "海鹽布丁", "請叫我海鹽布丁"), ("persona.style", "溫柔", "口吻溫柔一點"))]
-        return [change("district", "板橋區", message)]
+        return []
 
     setup_model(bot, build)
     # 真正入口先收進 jobs＋原文，尚未執行任何 AI。
@@ -48,14 +48,12 @@ async def test_mixed_setup_keeps_partial_values_confirms_preferences_and_opens_c
     await bot.drain_chats()
     user = await bot.db.one("SELECT * FROM users")
     draft = json.loads(user["setup_data"])
-    assert user["setup_step"] == "region" and draft["wake_time"]["value"] == "07:30"
+    assert user["setup_step"] == "morning" and draft["wake_time"]["value"] == "07:30"
     assert "district" not in draft and "alerts_enabled" not in draft
     assert "07:30" in bot.line.replies[-1]["payload"]["messages"][0]["text"]
     assert await bot.db.all("SELECT * FROM memories") == []
     await chat(bot, "確認")
-    assert (await bot.db.one("SELECT setup_step FROM users"))["setup_step"] == "region"
-    await chat(bot, "板橋區")
-    assert (await bot.db.one("SELECT setup_step FROM users"))["setup_step"] == "notifications"
+    assert (await bot.db.one("SELECT setup_step FROM users"))["setup_step"] == "morning"
     for text in ("全部關閉", "保持關閉", "陪我聊天"):
         await chat(bot, text)
     assert (await bot.db.one("SELECT setup_step FROM users"))["setup_step"] == "confirm"
@@ -64,7 +62,7 @@ async def test_mixed_setup_keeps_partial_values_confirms_preferences_and_opens_c
     assert await bot.db.all("SELECT * FROM memories") == []
     await chat(bot, "確認")
     user = await bot.db.one("SELECT * FROM users")
-    assert (user["city"], user["district"], user["wake_time"], user["setup_step"]) == ("新北市", "板橋區", "07:30", "done")
+    assert (user["city"], user["district"], user["wake_time"], user["setup_step"]) == ("新北市", None, "07:30", "done")
     assert user["morning_enabled"] == user["alerts_enabled"] == user["night_forecast_enabled"] == 0
     memories = await bot.db.all("SELECT * FROM memories")
     assert {m["key"]: m["value"] for m in memories} == {"persona.address_user_as": "海鹽布丁", "persona.style": "溫柔"}
@@ -73,7 +71,8 @@ async def test_mixed_setup_keeps_partial_values_confirms_preferences_and_opens_c
     await bot.db.open()
     await chat(bot, "你會怎麼叫我？")
     context = bot.model.calls[-1]["data"]
-    assert context["user_settings"]["wake_time"] == "07:30" and context["user_settings"]["district"] == "板橋區"
+    assert context["user_settings"]["wake_time"] == "07:30" and context["user_settings"]["city"] == "新北市"
+    assert "district" not in context["user_settings"]
     assert context["persona"] == {"address_user_as": "海鹽布丁", "style": "溫柔"}
     assert "海鹽布丁" in bot.line.replies[-1]["payload"]["messages"][0]["text"]
     assert bot.line.pushes == [] and all(r["elapsed_seconds"] < 60 for r in bot.line.replies)
@@ -96,7 +95,7 @@ async def test_old_received_history_recovers_time_without_guessing_district(bot)
     assert draft["city"]["value"] == "臺北市" and draft["wake_time"]["value"] == "07:30"
     assert "district" not in draft and "morning_enabled" not in draft
     text = bot.line.replies[-1]["payload"]["messages"][0]["text"]
-    assert "請補行政區" in text and "07:30" in text
+    assert onboarding_reminder("morning") in text and "07:30" in text and "補行政區" not in text
 
 
 @pytest.mark.parametrize("case", ["foreign_source", "fake_quote", "fake_time", "fake_city", "wrong_switch", "unsafe_preference"])
@@ -123,9 +122,10 @@ async def test_untrusted_setup_output_cannot_fill_or_unlock_user(bot, case):
     user = await bot.db.one("SELECT * FROM users")
     assert user["setup_step"] == "region" and json.loads(user["setup_data"]) == {}
     assert await bot.db.all("SELECT * FROM memories") == []
-    assert "新手引導尚未完成" in bot.line.replies[-1]["payload"]["messages"][0]["text"]
+    assert onboarding_reminder("region") in bot.line.replies[-1]["payload"]["messages"][0]["text"]
     assert len(await bot.db.all("SELECT * FROM messages WHERE kind='received'")) == 1
-    assert (await bot.db.one("SELECT error FROM jobs"))["error"] in {"ValueError", "ValidationError"}
+    assert (await bot.db.one("SELECT error FROM jobs"))["error"] is None
+    assert "有一項答案的意思還不夠明確" in bot.line.replies[-1]["payload"]["messages"][0]["text"]
 
 
 async def test_setup_model_timeout_retains_input_and_replies_fixed_prompt(bot):
@@ -134,7 +134,7 @@ async def test_setup_model_timeout_retains_input_and_replies_fixed_prompt(bot):
     await chat(bot, "我住新北市板橋區，早上7:30起床")
     assert (await bot.db.one("SELECT content FROM messages"))["content"].startswith("我住新北市")
     assert (await bot.db.one("SELECT setup_step FROM users"))["setup_step"] == "region"
-    assert "新手引導尚未完成" in bot.line.replies[-1]["payload"]["messages"][0]["text"]
+    assert onboarding_reminder("region") in bot.line.replies[-1]["payload"]["messages"][0]["text"]
     assert bot.line.replies[-1]["elapsed_seconds"] < 1 and bot.line.pushes == []
 
 
@@ -217,7 +217,7 @@ def test_quoted_substring_cannot_drop_negation_or_notification_scope(key, value,
 
 
 async def test_general_alerts_only_option_is_saved_after_confirmation(bot):
-    for text in ("新北市板橋區", "07:30", "只開一般提醒", "保持關閉", "確認"):
+    for text in ("新北市", "07:30", "只開一般提醒", "保持關閉", "先跳過", "確認"):
         await chat(bot, text)
     user = await bot.db.one("SELECT * FROM users")
     assert user["setup_step"] == "done" and user["morning_enabled"] == user["night_forecast_enabled"] == 0 and user["alerts_enabled"] == 1

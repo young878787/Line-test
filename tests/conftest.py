@@ -17,6 +17,7 @@ import pytest_asyncio
 from weather_bot.ai import PROMPT_VERSION
 from weather_bot.config import PROJECT_ROOT, Settings, TZ
 from weather_bot.workers import Bot
+from weather_bot.regions import CITIES, DATASET
 
 
 class TestClock:
@@ -103,7 +104,7 @@ class LineMock:
 
 @pytest.fixture
 def raw_weather():
-    return json.loads((Path(__file__).parent / "fixtures/cwa_township.json").read_text(encoding="utf-8"))
+    return json.loads((Path(__file__).parent / "fixtures/cwa_counties.json").read_text(encoding="utf-8"))
 
 
 @pytest_asyncio.fixture
@@ -112,7 +113,13 @@ async def bot(ci_database_path, raw_weather, request):
     line = LineMock(clock)
     async def handler(request):
         assert request.url.host == "opendata.cwa.gov.tw", "一般 CI 禁止真實網路"
-        return httpx.Response(200, json=raw_weather)
+        assert request.url.path.endswith("/" + DATASET)
+        city = request.url.params["LocationName"]
+        assert city in CITIES
+        raw = deepcopy(raw_weather)
+        location = raw["records"]["Locations"][0]["Location"][0]
+        location.update(LocationName=city, Geocode=CITIES[city])
+        return httpx.Response(200, json=raw)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         runtime = Bot(Settings(database=ci_database_path, line_secret="test-secret", cwa_key="fake-key"), clock=clock, http=http, ai=model, sender=line)
         await runtime.start(workers=False)
@@ -153,10 +160,10 @@ def ci_database_path(request):
     return str(path)
 
 
-async def configured(bot, uid="Utest"):
+async def configured(bot, uid="Utest", city="新北市"):
     await bot.db.ensure_user(uid)
-    data, _ = await bot.weather.refresh("F-D0047-069", "板橋區")
-    await bot.db.execute("UPDATE users SET city='新北市',district='板橋區',dataset='F-D0047-069',location_code=?,setup_step='done' WHERE id=?", (data["location_code"], uid))
+    data, _ = await bot.weather.refresh(DATASET, city)
+    await bot.db.execute("UPDATE users SET city=?,dataset=?,location_code=?,setup_step='done' WHERE id=?", (city, DATASET, data["location_code"], uid))
     return await bot.db.one("SELECT * FROM users WHERE id=?", (uid,))
 
 

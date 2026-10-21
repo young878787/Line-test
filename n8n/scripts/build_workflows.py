@@ -10,6 +10,7 @@ from runtime_config import ADAPTER_URL, INTERNAL_HEADER, internal_key
 
 SKILLS = ["using-n8n-mcp-skills", "n8n-workflow-patterns", "n8n-mcp-tools-expert",
           "n8n-node-configuration", "n8n-expression-syntax", "n8n-error-handling", "n8n-validation-expert"]
+DESCRIPTION = "LINE 原文入庫後 ACK；天氣地區必填全臺22縣市，使用F-D0047-089縣市級預報；逐題引導、口語更正與聊天共用業務核心；晨報、預報變更、夜間延後及 outbox 重試由背景排程完成。"
 
 
 def unpack(result):
@@ -48,6 +49,10 @@ def source(cred, *, mock=False):
             sample = {"headers": {"x-line-signature": "test", "x-received-at": "0", "x-received-proof": "test"}, "body": {"events": []}}
         elif name == "Verify and Persist":
             sample = {"statusCode": 200, "body": {"status": "ok"}}
+        elif name == "Process Chat Jobs":
+            sample = {"status": "ok", "pending": 0}
+        elif name == "Weather Outbox and Memory":
+            sample = {"status": "ok", "jobs": [], "notices": []}
         elif kind == "errorTrigger":
             sample = {"workflow": {"id": "sample"}, "execution": {"id": "sample", "lastNodeExecuted": "sample"}}
         spec = {"type": "n8n-nodes-base." + kind, "version": version, "config": config, "output": [sample]}
@@ -120,6 +125,11 @@ def build(*, mock=False, client=None):
             operations.append({"type": "updateNodeParameters", "nodeName": current["name"], "parameters": config["parameters"], "replace": True})
         if bool(current.get("disabled")) != bool(config.get("disabled")):
             operations.append({"type": "setNodeDisabled", "nodeName": current["name"], "disabled": bool(config.get("disabled"))})
+        node_settings = {k: config[k] for k in ("onError", "retryOnFail", "maxTries", "waitBetweenTries") if k in config}
+        if any(current.get(k) != v for k, v in node_settings.items()):
+            operations.append({"type": "setNodeSettings", "nodeName": current["name"], "settings": node_settings})
+    if detail.get("description") != DESCRIPTION:
+        operations.append({"type": "setWorkflowMetadata", "description": DESCRIPTION})
     settings = {"timezone": "Asia/Taipei", "executionTimeout": 300, "executionOrder": "v1", "saveManualExecutions": True,
                 "saveDataErrorExecution": "all", "saveDataSuccessExecution": "all" if mock else "none"}
     if any(detail["settings"].get(k) != v for k, v in settings.items()):
@@ -128,8 +138,19 @@ def build(*, mock=False, client=None):
         client.call("update_workflow", {"workflowId": workflow_id, "operations": operations, "versionName": "Apply verified service settings", "skillsUsed": SKILLS})
         detail = unpack(client.call("get_workflow_details", {"workflowId": workflow_id}))["workflow"]
     assert detail["connections"]["Workflow Failed"]["main"][0][0]["node"] == "Save Sanitized Failure"
+    for name, target in (("LINE Raw Webhook", "Verify and Persist"), ("Verify and Persist", "Return Verified Status"),
+                         ("Return Verified Status", "Process Chat Jobs"), ("Recover Pending Chats", "Process Chat Jobs"),
+                         ("Background Every Second", "Weather Outbox and Memory"), ("Run Background Tick", "Weather Outbox and Memory")):
+        assert detail["connections"][name]["main"][0][0]["node"] == target, f"流程接線不符：{name}"
+    assert detail["connections"]["Verify and Persist"]["main"][1][0]["node"] == "Adapter Unavailable"
+    for spec in specs:
+        node = next(n for n in detail["nodes"] if n["name"] == spec["config"]["name"])
+        assert node["parameters"] == spec["config"]["parameters"]
+        for key in ("onError", "retryOnFail", "maxTries", "waitBetweenTries"):
+            if key in spec["config"]:
+                assert node.get(key) == spec["config"][key]
     assert not detail["settings"].get("errorWorkflow"), "錯誤處理必須留在同一 workflow"
-    save(ROOT / "workflows/workflow.json", {k: detail[k] for k in ("name", "nodes", "connections", "settings")})
+    save(ROOT / "workflows/workflow.json", {**{k: detail[k] for k in ("name", "nodes", "connections", "settings")}, "description": DESCRIPTION})
     return manifest
 
 

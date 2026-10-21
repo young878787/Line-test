@@ -7,14 +7,14 @@ import subprocess
 import uuid
 
 from mcp_client import LocalN8n, ROOT, LOGS, save
-from build_workflows import unpack
+from build_workflows import DESCRIPTION, unpack
 
 
 def main():
     client = LocalN8n()
     manifest = json.loads((ROOT / "workflows/manifest.json").read_text(encoding="utf-8"))
     workflow = unpack(client.call("get_workflow_details", {"workflowId": manifest["id"]}))["workflow"]
-    save(ROOT / "workflows/workflow.json", {**{k: workflow[k] for k in ("name", "nodes", "connections", "settings")}, "active": False})
+    save(ROOT / "workflows/workflow.json", {**{k: workflow[k] for k in ("name", "nodes", "connections", "settings")}, "description": DESCRIPTION, "active": False})
     validations = {name: unpack(json.loads((LOGS / f"{name}.json").read_text(encoding="utf-8"))) for name in ("nodes_validation", "workflow_validation")}
     assert all(v.get("valid") is True and not v.get("errors") and not v.get("warnings") for v in validations.values())
     assert all(uuid.UUID(node["id"]).version == 4 for node in workflow["nodes"])

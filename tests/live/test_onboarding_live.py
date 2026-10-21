@@ -62,24 +62,23 @@ async def test_T07_real_ai_onboarding_confirmation_memory_and_chat(bot):
         try:
             user = await send("我住新北市，早上7.30起床，請叫我海鹽布丁，口吻溫柔一點。")
             draft = json.loads(user["setup_data"])
-            assert user["setup_step"] == "region" and draft["wake_time"]["value"] == "07:30" and "district" not in draft
-            user = await send("板橋區")
-            assert user["setup_step"] == "notifications"
+            assert user["setup_step"] == "morning" and draft["city"]["value"] == "新北市" and draft["wake_time"]["value"] == "07:30"
+            assert "district" not in draft
             for text in ("全部關閉", "保持關閉", "我想先聊天"):
                 user = await send(text)
-            assert user["setup_step"] == "confirm" and len(report["calls"]) == 2
+            assert user["setup_step"] == "confirm" and len(report["calls"]) == 1
             assert await bot.db.all("SELECT * FROM memories") == []
             user = await send("確認")
-            assert user["setup_step"] == "done" and user["wake_time"] == "07:30" and user["district"] == "板橋區"
+            assert user["setup_step"] == "done" and user["wake_time"] == "07:30" and user["city"] == "新北市" and user["district"] is None
             memories = await bot.db.all("SELECT * FROM memories")
             assert {m["key"]: m["value"] for m in memories} == {"persona.address_user_as": "海鹽布丁", "persona.style": "溫柔"}
             await send("你會怎麼稱呼我？")
             assert "海鹽布丁" in report["steps"][-1]["reply"]
             context = report["calls"][-1]["input"]
             assert context["persona"]["style"] == "溫柔" and context["user_settings"]["wake_time"] == "07:30"
-            assert len(report["calls"]) == 3 and all(s["reply_seconds"] < 60 for s in report["steps"])
+            assert len(report["calls"]) == 2 and all(s["reply_seconds"] < 60 for s in report["steps"])
             assert bot.line.pushes == []
-            report.update(status="PASS", settings={k: user[k] for k in ("city", "district", "wake_time", "morning_enabled", "alerts_enabled", "night_forecast_enabled")},
+            report.update(status="PASS", settings={k: user[k] for k in ("city", "wake_time", "morning_enabled", "alerts_enabled", "night_forecast_enabled")},
                           memories=[{k: m[k] for k in ("key", "value", "source_message_ids")} for m in memories])
         except Exception as error:
             report["error_type"] = type(error).__name__

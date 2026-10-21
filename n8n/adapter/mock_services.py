@@ -11,6 +11,7 @@ import time
 import httpx
 
 from weather_bot.config import TZ
+from weather_bot.regions import CITIES, DATASET
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,7 +33,7 @@ class MockClock:
 class MockServices:
     def __init__(self, clock):
         self.clock = clock
-        self.weather = json.loads((ROOT / "fixtures/cwa_township.json").read_text(encoding="utf-8"))
+        self.weather = json.loads((ROOT / "fixtures/cwa_counties.json").read_text(encoding="utf-8"))
         self.tokens, self.used_tokens = {}, set()
         self.calls, self.replies, self.pushes = [], [], []
         self.push_keys = set()
@@ -49,7 +50,12 @@ class MockServices:
         host, path = request.url.host, request.url.path
         self.calls.append({"host": host, "path": path, "method": request.method})
         if host == "opendata.cwa.gov.tw":
+            assert path.endswith("/" + DATASET)
+            city = request.url.params["LocationName"]
+            assert city in CITIES
+            self.calls[-1]["city"] = city
             weather = deepcopy(self.weather)
+            weather["records"]["Locations"][0]["Location"][0].update(LocationName=city, Geocode=CITIES[city])
             if self.weather_rain:
                 for element in weather["records"]["Locations"][0]["Location"][0]["WeatherElement"]:
                     for row in element["Time"]:

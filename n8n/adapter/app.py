@@ -147,7 +147,10 @@ def create_apps(settings, *, mock, key, ready=lambda: True, request_stop=None):
             await bot.send_due()
             await bot.run_background()
             await bot.send_due()
-        return {"status": "ok"}
+            jobs = await bot.db.all("SELECT kind,status,COUNT(*) AS count FROM jobs WHERE kind!='chat' GROUP BY kind,status")
+            notices = await bot.db.all("SELECT kind,status,COUNT(*) AS count FROM outbox WHERE method='push' GROUP BY kind,status")
+        # 讓 n8n execution 能看見延後、失敗及已送達狀態，避免 HTTP 200 被誤認為全部送達。
+        return {"status": "ok", "jobs": jobs, "notices": notices}
 
     @private.post("/errors")
     async def error(request: Request):

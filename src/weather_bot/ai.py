@@ -7,7 +7,7 @@ import httpx
 from weather_bot.ai_summary import VLLMClient
 from weather_bot.schemas import MemoryResult, Reply, SetupResult
 
-PROMPT_VERSION = "galgame-v3-onboarding-evidence"
+PROMPT_VERSION = "galgame-v4-guided-settings-weather-changes"
 
 
 class AIOutputError(ValueError):

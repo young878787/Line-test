@@ -31,7 +31,7 @@ async def test_scope_guard_and_injection_dont_change_mode(bot):
 
 
 async def test_onboarding_settings_and_persistence(bot):
-    for text in ("你好", "新北市板橋區", "07:00", "全部開啟", "保持關閉", "確認"):
+    for text in ("你好", "新北市", "07:00", "全部開啟", "保持關閉", "先跳過", "確認"):
         await chat(bot, text)
     user = await bot.db.one("SELECT * FROM users")
     assert user["setup_step"] == "done" and user["night_forecast_enabled"] == 0

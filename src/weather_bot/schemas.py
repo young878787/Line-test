@@ -114,7 +114,7 @@ class MemoryResult(StrictModel):
 
 
 class SetupChange(StrictModel):
-    key: Literal["city", "district", "wake_time", "morning_enabled", "alerts_enabled", "night_forecast_enabled",
+    key: Literal["city", "wake_time", "morning_enabled", "alerts_enabled", "night_forecast_enabled",
                  "persona.address_user_as", "persona.name", "persona.style", "persona.tsundere_level", "weather.cold_sensitive"]
     value: str = Field(min_length=1, max_length=80, description="城市採正式名稱；時間採HH:MM；通知開關只用開啟或關閉；偏好只用使用者明確說出的內容。")
     source_message_id: int = Field(gt=0)

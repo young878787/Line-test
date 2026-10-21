@@ -3,11 +3,11 @@
   "records": {
     "Locations": [
       {
-        "LocationsName": "新北市",
+        "LocationsName": "台灣",
         "Location": [
           {
-            "LocationName": "板橋區",
-            "Geocode": "65000010",
+            "LocationName": "新北市",
+            "Geocode": "65000000",
             "WeatherElement": [
               {
                 "ElementName": "天氣現象",

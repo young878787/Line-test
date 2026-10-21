@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from mcp_client import LocalN8n, LOGS, save
 from build_workflows import unpack
 from runtime_config import INTERNAL_HEADER, N8N_URL, TICK_PATH, internal_key
+from weather_bot.regions import CITIES, DATASET
 
 SECRET = b"n8n-mock-signature-secret"
 
@@ -65,13 +66,15 @@ class WorkflowTests(unittest.TestCase):
         key = "line:" + event["webhookEventId"]
         return self.wait_for(lambda s: any(j["business_key"] == key and j["status"] not in {"running", "pending"} for j in s["tables"]["jobs"]))
 
-    def configured(self, uid="Utest", *, preference=False):
-        for text in ("新北市板橋區", "07:00", "全部開啟", "保持關閉"):
+    def configured(self, uid="Utest", *, preference=False, city="新北市"):
+        for text in (city, "07:00", "開啟晨報", "起床後再提醒"):
             state = self.chat(text, uid)
-        self.assertEqual(next(u for u in state["tables"]["users"] if u["id"] == uid)["setup_step"], "confirm")
+        self.assertEqual(next(u for u in state["tables"]["users"] if u["id"] == uid)["setup_step"], "preferences")
         if preference:
             self.chat("叫我海鹽布丁，口吻溫柔一點", uid)
-        return self.chat("確認", uid)
+        else:
+            self.chat("先跳過", uid)
+        return self.chat("確認開始", uid)
 
     def control(self, **values):
         self.http.post("/mock/control", json=values).raise_for_status()
@@ -105,7 +108,7 @@ class WorkflowTests(unittest.TestCase):
         r = self.post({"events": [self.event("你好，世界！")]}, indent=3)
         self.assertEqual(r.status_code, 200)
         state = self.wait_for(lambda s: len(s["replies"]) == 1)
-        self.assertIn("新手引導尚未完成", state["replies"][0]["payload"]["messages"][0]["text"])
+        self.assertIn("縣市", state["replies"][0]["payload"]["messages"][0]["text"])
         self.assertEqual(self.ai_calls(state), 0)
 
     def test_02_invalid_signature_rejected(self):
@@ -134,7 +137,9 @@ class WorkflowTests(unittest.TestCase):
     def test_06_onboarding_requires_confirmation_and_saves_sources(self):
         state = self.configured(preference=True)
         user = state["tables"]["users"][0]
-        self.assertEqual((user["setup_step"], user["district"], user["wake_time"]), ("done", "板橋區", "07:00"))
+        self.assertEqual((user["setup_step"], user["city"], user["wake_time"]), ("done", "新北市", "07:00"))
+        self.assertIsNone(user["district"])
+        self.assertEqual((user["dataset"], user["location_code"]), (DATASET, CITIES["新北市"]))
         self.assertEqual({m["key"] for m in state["tables"]["memories"]}, {"persona.address_user_as", "persona.style"})
         self.assertTrue(all(json.loads(m["source_message_ids"]) for m in state["tables"]["memories"]))
         self.assertEqual(state["pushes"], [])
@@ -151,7 +156,8 @@ class WorkflowTests(unittest.TestCase):
         self.configured()
         state = self.chat("今天下午天氣如何")
         text = state["replies"][-1]["payload"]["messages"][0]["text"]
-        self.assertIn("板橋區", text)
+        self.assertIn("新北市", text)
+        self.assertNotIn("None", text)
         self.assertIn("降雨機率", text)
         self.assertTrue(state["tables"]["weather_snapshots"])
 
@@ -196,11 +202,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len([c for c in state["http_calls"] if c["path"].endswith("/reply")]), calls)
         self.assertEqual(state["pushes"], [])
 
-    def test_14_cwa_failure_does_not_guess_region(self):
+    def test_14_cwa_failure_keeps_valid_county_setting(self):
         self.control(cwa_failure=True)
-        state = self.chat("新北市板橋區")
-        self.assertEqual(state["tables"]["users"][0]["setup_step"], "region")
-        self.assertIn("暫時無法確認", state["replies"][-1]["payload"]["messages"][0]["text"])
+        state = self.chat("臺中市")
+        self.assertEqual(state["tables"]["users"][0]["setup_step"], "wake")
+        self.assertIn("臺中市", state["replies"][-1]["payload"]["messages"][0]["text"])
+        self.assertFalse(any(c["host"] == "opendata.cwa.gov.tw" for c in state["http_calls"]))
 
     def test_15_background_memory_preserves_sources(self):
         self.configured()
@@ -287,6 +294,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_24_rain_change_alert_is_sent_once(self):
         self.configured()
+        self.chat("今天天氣如何？")
         self.control(weather_rain=True, advance_seconds=3000)
         state = self.background()
         alerts = [r for r in state["tables"]["outbox"] if r["kind"] == "weather_alert"]
@@ -342,6 +350,32 @@ class WorkflowTests(unittest.TestCase):
         state = self.wait_for(lambda s: s["tables"]["jobs"][0]["status"] == "expired", timeout=5)
         self.assertEqual(state["replies"], [])
         self.assertEqual(state["tables"]["outbox"], [])
+
+    def test_29_all_counties_setup_and_forecast(self):
+        for city, code in CITIES.items():
+            with self.subTest(city=city):
+                uid = "Ucounty" + code
+                state = self.configured(uid, city=city)
+                user = next(u for u in state["tables"]["users"] if u["id"] == uid)
+                self.assertEqual((user["city"], user["dataset"], user["location_code"]), (city, DATASET, code))
+                self.assertIsNone(user["district"])
+                state = self.chat("今天天氣如何？", uid)
+                text = state["replies"][-1]["payload"]["messages"][0]["text"]
+                self.assertIn(city, text)
+                self.assertNotIn("None", text)
+                self.assertEqual(state["external_network_calls"], 0)
+
+    def test_30_query_county_preserves_home_and_ambiguous_city_is_required(self):
+        self.configured(city="臺北市")
+        state = self.chat("高雄市今天天氣如何？")
+        text = state["replies"][-1]["payload"]["messages"][0]["text"]
+        self.assertIn("高雄市", text)
+        self.assertNotIn("臺北市", text)
+        self.assertEqual(state["tables"]["users"][0]["city"], "臺北市")
+        state = self.chat("嘉義明天天氣如何？")
+        text = state["replies"][-1]["payload"]["messages"][0]["text"]
+        self.assertIn("嘉義縣", text)
+        self.assertIn("嘉義市", text)
 
     @classmethod
     def tearDownClass(cls):

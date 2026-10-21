@@ -11,7 +11,8 @@ import uuid
 from weather_bot.chat import fallback
 from weather_bot.db import dumps
 from weather_bot.line_io import fixed_payload, message_payload
-from weather_bot.onboarding import PREFERENCE_LABELS, collect_setup, initial_draft, setup_reply
+from weather_bot.onboarding import collect_setup, current_draft, initial_draft, setup_reply, setup_summary
+from weather_bot.regions import CITIES, city_from_text
 
 
 def requested_weather_range(text, now):
@@ -52,28 +53,26 @@ async def setting(bot, user, text, event):
     step = user["setup_step"]
     if step != "done":
         return await collect_setup(bot, user, text, event)
-    if text in {"設定", "修改地區", "修改起床時間"}:
-        draft = initial_draft(user)
-        # 已完成者修改單項時沿用其他正式設定，不重問所有通知。
-        for key in ("city", "district", "location_code", "wake_time", "morning_enabled", "alerts_enabled", "night_forecast_enabled"):
-            draft[key] = {"value": user[key], "source_message_id": None, "quote": ""}
-        for key in PREFERENCE_LABELS:
+    if text in {"設定", "查看設定", "取消修改"}:
+        draft = await current_draft(bot, user)
+        await bot.db.execute("UPDATE users SET setup_data=? WHERE id=?", (dumps(draft), uid))
+        return "目前設定 (｡･ω･｡)：\n" + setup_summary(draft) + "\n可直接說要改的項目，例如「晨報時間改成早上八點半」。"
+    if text in {"修改地區", "修改起床時間"}:
+        draft = await current_draft(bot, user)
+        for key in (("wake_time",) if text == "修改起床時間" else ("city",)):
             draft.pop(key, None)
-        for memory in await bot.memory.search_memories(uid, categories=["preferences"], limit=30):
-            if memory["scope"] == "real_user" and memory["key"] in PREFERENCE_LABELS:
-                draft[memory["key"]] = {"value": memory["value"], "source_message_id": max(json.loads(memory["source_message_ids"])), "quote": ""}
-        for key in (("wake_time",) if text == "修改起床時間" else ("city", "district", "location_code")):
-            draft.pop(key, None)
-        step = "wake" if text == "修改起床時間" else "region"
-        await bot.db.execute("UPDATE users SET setup_step=?,setup_data=? WHERE id=?", (step, dumps(draft), uid))
+        draft["_editing"] = True
+        await bot.db.execute("UPDATE users SET setup_data=? WHERE id=?", (dumps(draft), uid))
         return setup_reply(draft)
-    commands = {"開啟晨報": ("morning_enabled", 1), "關閉晨報": ("morning_enabled", 0),
-                "開啟天氣提醒": ("alerts_enabled", 1), "關閉天氣提醒": ("alerts_enabled", 0),
-                "開啟夜間提醒": ("night_forecast_enabled", 1), "關閉夜間提醒": ("night_forecast_enabled", 0)}
-    if step == "done" and text in commands:
-        column, value = commands[text]
-        await bot.db.execute(f"UPDATE users SET {column}=? WHERE id=?", (value, uid))
-        return "設定已更新。"
+    if text in {"開啟天氣提醒", "關閉天氣提醒"}:
+        await bot.db.execute("UPDATE users SET alerts_enabled=? WHERE id=?", (text.startswith("開啟"), uid))
+        return "設定已更新。\n" + setup_summary(await current_draft(bot, await bot.db.one("SELECT * FROM users WHERE id=?", (uid,))))
+    setting_request = re.search(
+        r"(?:修改|更正).{0,8}(?:地區|縣市|時間|晨報|夜間|稱呼|口吻)|(?:地區|縣市|時間|晨報|夜間|稱呼|口吻).{0,8}(?:改|開|關)"
+        r"|改住|搬到|(?:開啟|關閉)(?:晨報|夜間提醒)|^(?:請)?(?:叫我|稱呼我|以後叫我)|夜間也提醒|起床後再提醒"
+        r"|晨報.*(?:要|不要|不用)|夜間.*(?:要|不要|不用)", text)
+    if initial_draft(user).get("_editing") or (setting_request and not re.search(r"[？?]|怎麼|如何", text)):
+        return await collect_setup(bot, user, text, event, editing=True)
     return None
 
 
@@ -147,8 +146,16 @@ async def _process_chat(bot, job, *, processing_remaining, skip_model):
                     payload = fixed_payload("這段有點長，請拆成較短的訊息再跟我聊吧。")
                 else:
                     is_chat = True
-                    weather = await bot.weather.get_weather(user, requested_weather_range(text, bot.clock.now())) if re.search(r"天氣|下雨|降雨|氣溫|幾度|冷不冷", text) else None
-                    reply, context = await bot.chat.generate(user, text, weather=weather)
+                    weather = None
+                    if re.search(r"天氣|下雨|降雨|氣溫|幾度|冷不冷", text):
+                        try:
+                            city = city_from_text(text) or user["city"]
+                        except ValueError as exc:
+                            payload = fixed_payload(str(exc))
+                        else:
+                            weather = await bot.weather.get_weather({**user, "city": city, "location_code": CITIES[city]}, requested_weather_range(text, bot.clock.now()))
+                    if payload is None:
+                        reply, context = await bot.chat.generate(user, text, weather=weather)
     except Exception as exc:
         # 僅記錄錯誤類型於 job；不可把含 API URL/金鑰的例外字串寫進 log。
         generation_error = type(exc).__name__

@@ -1,12 +1,14 @@
-﻿"""氣象署鄉鎮預報：按有效時間對齊，不以陣列索引配對。"""
+﻿"""氣象署縣市預報：按有效時間對齊，不以陣列索引配對。"""
+import asyncio
 from datetime import datetime, timedelta
 import hashlib
 import json
+import uuid
 from weather_bot.config import TZ
 from weather_bot.db import dumps
+from weather_bot.regions import CITIES, DATASET
 
 CWA_BASE_URL = "https://opendata.cwa.gov.tw/api/v1/rest/datastore"
-DATASETS = {"臺北市": "F-D0047-061", "新北市": "F-D0047-069"}
 DRY_CODES = set(range(1, 8))
 RAIN_CODES = set(range(8, 42)) - {24, 25, 26, 27, 28}
 
@@ -24,21 +26,23 @@ def number(value, *, minimum=-80, maximum=80):
         return None
 
 
-def normalize(raw, district, dataset, now):
+def normalize(raw, city, dataset, now):
+    if city not in CITIES or dataset != DATASET:
+        raise ValueError("請提供有效縣市與縣市級預報來源")
     records = raw.get("records", {})
     groups = records.get("Locations", records.get("locations", []))
     if isinstance(groups, dict):
         groups = [groups]
     if not groups:
-        raise ValueError("缺少鄉鎮預報資料")
+        raise ValueError("缺少縣市預報資料")
     group = groups[0]
     locations = group.get("Location", group.get("location", []))
-    location = next((loc for loc in locations if loc.get("LocationName", loc.get("locationName")) == district), None)
+    location = next((loc for loc in locations if loc.get("LocationName", loc.get("locationName")) == city), None)
     if location is None:
-        raise ValueError("找不到行政區")
+        raise ValueError("找不到縣市")
     code = str(location.get("Geocode", location.get("geocode", "")))
-    if not code:
-        raise ValueError("缺少行政區代碼")
+    if code != CITIES[city]:
+        raise ValueError("縣市代碼缺漏或不符")
     elements = {}
     for item in location.get("WeatherElement", location.get("weatherElement", [])):
         elements[item.get("ElementName", item.get("elementName"))] = item.get("Time", item.get("time", []))
@@ -89,7 +93,7 @@ def normalize(raw, district, dataset, now):
         raise ValueError("預報已過期")
     if any(p["weather_code"] is None for p in periods):
         raise ValueError("天氣現象代碼缺漏")
-    canonical = {"location_code": code, "district": district, "dataset": dataset, "periods": periods}
+    canonical = {"location_code": code, "city": city, "dataset": dataset, "periods": periods}
     canonical["forecast_hash"] = hashlib.sha256(dumps(canonical).encode()).hexdigest()
     issued = records.get("IssueTime") or group.get("IssueTime")
     canonical["source_issued_at"] = parse_time(issued).isoformat() if issued else None
@@ -113,6 +117,25 @@ def rain_candidates(old, new, now):
     return result
 
 
+def forecast_changes(old, new, now):
+    previous = {(p["valid_from"], p["valid_to"]): p for p in old["periods"]}
+    result = []
+    for p in new["periods"]:
+        if parse_time(p["valid_to"]) <= now or parse_time(p["valid_from"]) >= now + timedelta(hours=24):
+            continue
+        before = previous.get((p["valid_from"], p["valid_to"]))
+        if not before:
+            continue
+        changes = {key: {"before": before[key], "after": p[key]} for key in
+                   ("weather_code", "temperature", "apparent_temperature", "pop_3h")
+                   if before.get(key) is not None and p.get(key) is not None and before[key] != p[key]}
+        if "weather_code" in changes:
+            changes["weather_code"] = {"before": before["weather"], "after": p["weather"]}
+        if changes:
+            result.append({**p, "changes": changes})
+    return result
+
+
 def merge_rain(periods):
     result = []
     for p in sorted(periods, key=lambda p: p["valid_from"]):
@@ -131,21 +154,24 @@ def is_night(now):
 class WeatherService:
     def __init__(self, db, http, key, clock):
         self.db, self.http, self.key, self.clock = db, http, key, clock
+        self.refresh_lock = asyncio.Lock()
 
-    async def fetch(self, dataset, district):
+    async def fetch(self, dataset, city):
+        if city not in CITIES or dataset != DATASET:
+            raise ValueError("請先設定有效縣市")
         if not self.key:
             raise ValueError("CWA_API_KEY 未設定")
         response = await self.http.get(f"{CWA_BASE_URL}/{dataset}",
-            params={"Authorization": self.key, "format": "JSON", "LocationName": district}, timeout=10)
+            params={"Authorization": self.key, "format": "JSON", "LocationName": city}, timeout=10)
         response.raise_for_status()
-        return normalize(response.json(), district, dataset, self.clock.now())
+        return normalize(response.json(), city, dataset, self.clock.now())
 
     async def latest(self, location_code):
         row = await self.db.one("SELECT data FROM weather_snapshots WHERE location_code=? ORDER BY fetched_at DESC,id DESC LIMIT 1", (location_code,))
         return json.loads(row["data"]) if row else None
 
-    async def refresh(self, dataset, district):
-        new = await self.fetch(dataset, district)
+    async def refresh(self, dataset, city):
+        new = await self.fetch(dataset, city)
         old = await self.latest(new["location_code"])
         if old and old["forecast_hash"] == new["forecast_hash"]:
             return old, []
@@ -154,10 +180,13 @@ class WeatherService:
         return new, rain_candidates(old, new, self.clock.now()) if old else []
 
     async def get_weather(self, user, time_range=None):
-        data = await self.latest(user["location_code"])
+        city = user.get("city")
+        if city not in CITIES:
+            raise ValueError("請先設定有效縣市")
+        data = await self.latest(CITIES[city])
         now = self.clock.now()
-        if data is None or not any(parse_time(p["valid_to"]) > now for p in data["periods"]):
-            data, _ = await self.refresh(user["dataset"], user["district"])
+        if data is None or data.get("city") != city or data.get("dataset") != DATASET or not any(parse_time(p["valid_to"]) > now for p in data["periods"]):
+            data, _ = await self.refresh(DATASET, city)
         result = dict(data)
         start, end = time_range or (now, now + timedelta(hours=24))
         result["periods"] = [p for p in data["periods"] if parse_time(p["valid_to"]) > start and parse_time(p["valid_from"]) < end]

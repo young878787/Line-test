@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import aiosqlite
+from weather_bot.regions import CITIES, DATASET, normalize_city
 
 
 def dumps(value):
@@ -77,6 +78,17 @@ class Database:
             columns = {row["name"] for row in await cursor.fetchall()}
         if "setup_data" not in columns:
             await self.conn.execute("ALTER TABLE users ADD COLUMN setup_data TEXT NOT NULL DEFAULT '{}'")
+        # 保留舊行政區與歷史資料，只更新可由已確認縣市推導的查詢欄位。
+        async with self.transaction() as conn:
+            async with conn.execute("SELECT id,city,dataset,location_code FROM users WHERE setup_step='done'") as cursor:
+                users = await cursor.fetchall()
+            for user in users:
+                city = normalize_city(user["city"])
+                if city is None:
+                    await conn.execute("UPDATE users SET setup_step='region' WHERE id=?", (user["id"],))
+                elif (user["city"], user["dataset"], user["location_code"]) != (city, DATASET, CITIES[city]):
+                    await conn.execute("UPDATE users SET city=?,dataset=?,location_code=? WHERE id=?", (city, DATASET, CITIES[city], user["id"]))
+            await conn.execute("UPDATE jobs SET status='cancelled' WHERE kind='weather' AND status IN ('pending','running') AND json_extract(payload,'$.district') IS NOT NULL")
         return self
 
     async def close(self):

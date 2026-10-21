@@ -72,14 +72,14 @@ async def test_live_T01_T05_end_to_end(ci_database_path):
     await bot.start(workers=False)
     try:
         with check('T01'):
-            forecast, _ = await bot.weather.refresh('F-D0047-069', '\u677f\u6a4b\u5340')
+            forecast, _ = await bot.weather.refresh('F-D0047-089', '\u65b0\u5317\u5e02')
             assert forecast['periods']
             results['T01'].update(periods=len(forecast['periods']), forecast_hash=forecast['forecast_hash'])
         if results['T01']['status'] == 'FAIL':
             pytest.fail('Live CWA failed; inspect logs/live/latest.json', pytrace=False)
         await bot.db.ensure_user('Ulive-test')
-        await bot.db.execute("UPDATE users SET city=?,district=?,dataset='F-D0047-069',location_code=?,setup_step='done' WHERE id='Ulive-test'",
-                             ('\u65b0\u5317\u5e02', '\u677f\u6a4b\u5340', forecast['location_code']))
+        await bot.db.execute("UPDATE users SET city=?,dataset='F-D0047-089',location_code=?,setup_step='done' WHERE id='Ulive-test'",
+                             ('\u65b0\u5317\u5e02', forecast['location_code']))
         user = await bot.db.one("SELECT * FROM users WHERE id='Ulive-test'")
         with check('T03'):
             await chat(bot, '\u670b\u53cb\u90fd\u53eb\u6211\u6d77\u9e7d\u5e03\u4e01\uff0c\u6211\u4e5f\u6bd4\u8f03\u559c\u6b61\u9019\u500b\u7a31\u547c\u3002', uid=user['id'])

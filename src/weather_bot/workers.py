@@ -121,8 +121,8 @@ class Bot:
         slot = now.replace(minute=40, second=0, microsecond=0)
         if slot > now:
             slot -= timedelta(hours=1)
-        for dataset, district in sorted({(u["dataset"], u["district"]) for u in users}):
-            await self.db.job("weather", None, f"weather:{dataset}:{district}:{slot.isoformat()}", {"dataset": dataset, "district": district}, epoch)
+        for dataset, city in sorted({(u["dataset"], u["city"]) for u in users}):
+            await self.db.job("weather", None, f"weather:{dataset}:{city}:{slot.isoformat()}", {"dataset": dataset, "city": city}, epoch)
         for user in users:
             uid = user["id"]
             wake = datetime.combine(now.date(), datetime.strptime(user["wake_time"], "%H:%M").time(), TZ)
@@ -259,16 +259,16 @@ class Bot:
         daily = await self.db.one("SELECT id FROM outbox WHERE user_id=? AND kind='weather_alert' AND send_at>=? AND status IN ('pending','sending','sent')", (user["id"], start))
         return daily is None and await self.push_budget(extra=True)
 
-    async def poll_weather(self, dataset, district):
-        weather, candidates = await self.weather.refresh(dataset, district)
+    async def poll_weather(self, dataset, city):
+        weather, candidates = await self.weather.refresh(dataset, city)
         if not candidates:
             return
-        users = await self.db.all("SELECT * FROM users WHERE dataset=? AND district=? AND setup_step='done'", (dataset, district))
+        users = await self.db.all("SELECT * FROM users WHERE dataset=? AND city=? AND setup_step='done'", (dataset, city))
         for user in users:
             if not await self.alert_allowed(user):
                 continue
             previous = await self.db.all("SELECT weather FROM outbox WHERE user_id=? AND status='sent' AND method='push' AND expires_at>?", (user["id"], self.clock.now().timestamp() - 86400))
-            informed = [p for row in previous for p in json.loads(row["weather"]).get("periods", [])]
+            informed = [p for row in previous if json.loads(row["weather"]).get("location_code") == user["location_code"] for p in json.loads(row["weather"]).get("periods", [])]
             relevant = [p for p in candidates if not any(p["valid_from"] >= old["valid_from"] and p["valid_to"] <= old["valid_to"] for old in informed)]
             if not relevant:
                 continue
