@@ -101,22 +101,6 @@ def normalize(raw, city, dataset, now):
     return canonical
 
 
-def rain_candidates(old, new, now):
-    previous = {(p["valid_from"], p["valid_to"]): p for p in old["periods"]}
-    result = []
-    for p in new["periods"]:
-        if parse_time(p["valid_to"]) <= now or parse_time(p["valid_from"]) > now + timedelta(hours=6):
-            continue
-        before = previous.get((p["valid_from"], p["valid_to"]))
-        if not before:
-            continue
-        changed = before["rain_state"] == "dry" and p["rain_state"] == "rain"
-        jumped = before["pop_3h"] is not None and p["pop_3h"] is not None and before["pop_3h"] <= 30 and p["pop_3h"] >= 60
-        if changed or jumped:
-            result.append(p)
-    return result
-
-
 def forecast_changes(old, new, now):
     previous = {(p["valid_from"], p["valid_to"]): p for p in old["periods"]}
     result = []
@@ -154,7 +138,7 @@ def is_night(now):
 class WeatherService:
     def __init__(self, db, http, key, clock):
         self.db, self.http, self.key, self.clock = db, http, key, clock
-        self.refresh_lock = asyncio.Lock()
+        self.refresh_locks = {}
 
     async def fetch(self, dataset, city):
         if city not in CITIES or dataset != DATASET:
@@ -171,13 +155,27 @@ class WeatherService:
         return json.loads(row["data"]) if row else None
 
     async def refresh(self, dataset, city):
-        new = await self.fetch(dataset, city)
-        old = await self.latest(new["location_code"])
-        if old and old["forecast_hash"] == new["forecast_hash"]:
-            return old, []
-        await self.db.execute("INSERT INTO weather_snapshots(location_code,source_issued_at,forecast_hash,fetched_at,data) VALUES (?,?,?,?,?) ON CONFLICT(location_code,forecast_hash) DO UPDATE SET source_issued_at=excluded.source_issued_at,fetched_at=excluded.fetched_at,data=excluded.data",
-            (new["location_code"], new["source_issued_at"], new["forecast_hash"], new["fetched_at"], dumps(new)))
-        return new, rain_candidates(old, new, self.clock.now()) if old else []
+        if city not in CITIES:
+            raise ValueError("請先設定有效縣市")
+        async with self.refresh_locks.setdefault(city, asyncio.Lock()):
+            new = await self.fetch(dataset, city)
+            old = await self.latest(new["location_code"])
+            if old and old["forecast_hash"] == new["forecast_hash"]:
+                return old, []
+            if old:
+                new["fetched_at"] = max(new["fetched_at"], old["fetched_at"] + 0.000001)
+            changes = forecast_changes(old, new, self.clock.now()) if old else []
+            async with self.db.transaction() as conn:
+                await conn.execute("INSERT INTO weather_snapshots(location_code,source_issued_at,forecast_hash,fetched_at,data) VALUES (?,?,?,?,?) ON CONFLICT(location_code,forecast_hash) DO UPDATE SET source_issued_at=excluded.source_issued_at,fetched_at=excluded.fetched_at,data=excluded.data",
+                    (new["location_code"], new["source_issued_at"], new["forecast_hash"], new["fetched_at"], dumps(new)))
+                if changes:
+                    async with conn.execute("SELECT id FROM users WHERE location_code=? AND active=1 AND setup_step='done' AND alerts_enabled=1", (new["location_code"],)) as cursor:
+                        users = await cursor.fetchall()
+                    # 快取與通知工作一起提交；聊天查詢也不能吃掉尚未通知的變更。
+                    for user in users:
+                        await conn.execute("INSERT INTO jobs(kind,user_id,business_key,payload,run_at,created_at) VALUES ('weather_change',?,?,?,?,?)",
+                            (user["id"], f"change:{user['id']}:{uuid.uuid4().hex}", dumps({"before": old, "weather": new}), self.clock.now().timestamp(), self.clock.now().timestamp()))
+            return new, changes
 
     async def get_weather(self, user, time_range=None):
         city = user.get("city")

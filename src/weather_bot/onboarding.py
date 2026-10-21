@@ -4,7 +4,7 @@ import json
 import re
 
 from weather_bot.db import dumps
-from weather_bot.schemas import MemoryUpdate, SetupChange, SetupResult
+from weather_bot.schemas import MemoryUpdate, SetupChange
 from weather_bot.regions import CITIES, CITY_PATTERN, DATASET, city_from_text, normalize_city
 
 ONBOARDING_STEPS = (
@@ -18,6 +18,10 @@ ONBOARDING_STEPS = (
 FORMAL_KEYS = ("city", "wake_time", "morning_enabled", "alerts_enabled", "night_forecast_enabled")
 PREFERENCE_LABELS = {"persona.address_user_as": "稱呼你", "persona.name": "角色名稱", "persona.style": "角色口吻",
                      "persona.tsundere_level": "傲嬌程度", "weather.cold_sensitive": "天氣偏好"}
+INVALID_HINTS = {"city": "地區請提供完整縣市，例如「新竹市」或「新竹縣」。",
+                 "wake_time": "時間請說明早上或晚上，例如「早上七點半」，也可用24小時格式「07:30」。",
+                 "morning_enabled": "晨報請明確說「開啟晨報」或「關閉晨報」。",
+                 "night_forecast_enabled": "夜間請明確說「夜間也提醒」或「起床後再提醒」。"}
 SETUP_PROMPT = """你是新手設定資料整理器，只輸出符合 schema 的 updates，不進行聊天、不替使用者補填預設值。
 每項更新必須包含 key、value、source_message_id 及逐字 quote，來源僅能是 messages 的使用者原句。
 quote 只引用該項設定與其開關意願的最小完整片段，不將多個通知的相反開關混在同一個 quote。
@@ -157,6 +161,8 @@ def validate_change(change, sources):
             raise ValueError("起床時間沒有明確來源")
         if source.get("step") != "wake" and not re.fullmatch(r"\d{1,2}[:：.]\d{2}", source["content"].strip()) and not re.search(r"起床|醒來|晨報|時間.*改", quote):
             raise ValueError("時間來源沒有表明起床用途")
+        if re.search(r"上班|出門|睡覺|就寢|下班", quote) and not re.search(r"起床|醒來|晨報", quote):
+            raise ValueError("其他作息時間不能代替起床時間")
         if re.search(r"(?:不是|不會|不想|不要).{0,10}(?:起床|醒來)|(?:起床|醒來).{0,3}不是", context):
             raise ValueError("起床時間原句為否定")
     elif key in FORMAL_KEYS:
@@ -183,9 +189,9 @@ def validate_change(change, sources):
             raise ValueError("夜間提醒不能代替一般提醒的選擇")
         if not canonical and not re.search(markers[key] + r"|全部通知|所有通知", quote):
             raise ValueError("通知種類不明確")
-        if not canonical and not re.search(r"開|關|要|不要|啟用|停用|取消|不用", quote):
+        if not canonical and not re.search(r"開|關|要|不要|啟用|停用|取消|不用|可以", quote):
             raise ValueError("未明確選擇通知開關")
-        negative = bool(re.search(r"不要|不用|不需要|不開|關閉|關掉|停用|取消", context))
+        negative = bool(re.search(r"不要|不用|不需要|不開|關閉|關掉|停用|取消|不可以", context))
         if not canonical and ((value == "開啟" and negative) or (value == "關閉" and not negative)):
             raise ValueError("通知開關與原句不一致")
         value = value == "開啟"
@@ -195,7 +201,7 @@ def validate_change(change, sources):
             raise ValueError("偏好沒有明確來源")
         if re.search(r"(?:不要|別|不喜歡|不叫).{0,5}" + re.escape(value), context):
             raise ValueError("偏好原句為否定")
-    if re.search(r"假設|如果|例如|比方", context):
+    if re.search(r"假設|如果|例如|比方|[？?]|嗎", context):
         raise ValueError("設定來源不是確定資料")
     place = re.escape(value[:-1]) + r"[縣市]?" if key == "city" else ""
     if key == "city" and re.search(r"(?:不是|不住|不在|搬離|不選|不要).{0,4}" + place, context.replace("台", "臺")):
@@ -208,6 +214,8 @@ def fixed_changes(text, step, source_id):
     match = re.fullmatch(rf"({CITY_PATTERN})(?:\s*.{{1,6}}[區鄉鎮市])?", text.replace("台", "臺"))
     if match:
         values = {"city": normalize_city(match[1])}
+    elif re.fullmatch(rf"(?:我住在|我住|住在|改住|搬到|(?:地區|縣市)改成)\s*({CITY_PATTERN})", text.replace("台", "臺")):
+        values = {"city": city_from_text(text)}
     elif re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", text):
         values = {"wake_time": next(iter(clock_values(text)))}
     elif step == "morning" and text in {"全部開啟", "只開晨報", "只開一般提醒", "全部關閉"}:
@@ -220,6 +228,13 @@ def fixed_changes(text, step, source_id):
     elif text in {"開啟晨報", "關閉晨報", "開啟夜間提醒", "關閉夜間提醒", "夜間也提醒", "起床後再提醒"}:
         values = {"morning_enabled" if "晨報" in text else "night_forecast_enabled":
                   "關閉" if text.startswith("關閉") or text == "起床後再提醒" else "開啟"}
+    elif re.fullmatch(r"(?:晨報|早報|夜間(?:提醒)?)(?:還是|先)?(?:不要|不用|關閉|開啟|要|不?可以(?:提醒我)?)(?:好了|了|吧)?", text):
+        values = {"night_forecast_enabled" if text.startswith("夜間") else "morning_enabled":
+                  "關閉" if re.search(r"不要|不用|關閉|不可以", text) else "開啟"}
+    elif re.fullmatch(r"(?:請)?(?:叫我|改叫我|以後叫我)[\w\u3400-\u9fff· ]{1,20}", text):
+        values = {"persona.address_user_as": re.sub(r"^(?:請)?(?:叫我|改叫我|以後叫我)", "", text)}
+    elif re.fullmatch(r"(?:口吻|語氣)?(?:改成|用)?(?:笨笨傲嬌|溫柔|元氣|淡定)(?:一點)?", text):
+        values = {"persona.style": re.search(r"笨笨傲嬌|溫柔|元氣|淡定", text)[0]}
     elif (step == "wake" or re.search(r"起床|醒來|晨報|時間.*改", text)) and not re.search(r"如果|假設|例如|[？?]|不是|不要|不想|不會|上班|出門|[，,。；;]|" + CITY_PATTERN, text.replace("台", "臺")):
         times = clock_values(text)
         if len(times) == 1:
@@ -262,7 +277,10 @@ async def commit_setup(bot, user, draft, *, editing=False):
             (city, DATASET, CITIES[city], *(draft[key]["value"] for key in FORMAL_KEYS[1:]), dumps(draft), user["id"]))
         await conn.execute("UPDATE conversation_state SET choices=NULL,choice_set_id=NULL,choices_expires=NULL WHERE user_id=?", (user["id"],))
         if editing:
-            await conn.execute("UPDATE outbox SET status='cancelled',error='settings_changed' WHERE user_id=? AND method='push' AND status='pending' AND attempts=0", (user["id"],))
+            if user["location_code"] != CITIES[city] or user["wake_time"] != draft["wake_time"]["value"] or not draft["morning_enabled"]["value"]:
+                await conn.execute("UPDATE outbox SET status='cancelled',error='settings_changed' WHERE user_id=? AND kind='morning_brief' AND status='pending' AND attempts=0", (user["id"],))
+            if user["location_code"] != CITIES[city] or not draft["alerts_enabled"]["value"]:
+                await conn.execute("UPDATE outbox SET status='cancelled',error='settings_changed' WHERE user_id=? AND kind='weather_alert' AND status='pending' AND attempts=0", (user["id"],))
             await conn.execute("UPDATE jobs SET status='cancelled',error='location_changed' WHERE user_id=? AND kind='weather_change' AND status='pending' AND json_extract(payload,'$.weather.location_code')!=?",
                                (user["id"], CITIES[city]))
     return ("設定已更新 (｡•̀ᴗ-)✧。" if editing else "設定與初始偏好已確認儲存，可以開始聊天了 (´▽｀)！") + "\n" + setup_summary(draft)
@@ -297,7 +315,16 @@ async def collect_setup(bot, user, text, event, *, editing=False):
     if text not in reserved and ((not changes and looks_like_setup(text)) or recover_history):
         data = {"task": "onboarding", "messages": list(reversed(sources)), "current_settings": draft, "current_step": step}
         try:
-            changes = SetupResult.model_validate(await bot.ai.generate(SETUP_PROMPT, data)).updates + changes
+            result = await bot.ai.generate(SETUP_PROMPT, data)
+            if not isinstance(result, dict) or set(result) != {"updates"} or not isinstance(result["updates"], list) or len(result["updates"]) > 12:
+                raise ValueError("設定抽取格式錯誤")
+            extracted = []
+            for item in result["updates"]:
+                try:
+                    extracted.append(SetupChange.model_validate(item))
+                except ValueError:
+                    warnings.append("有一項答案的意思還不夠明確，這一項沒有修改；其他有效答案會保留。")
+            changes = extracted + changes
         except Exception:
             warnings.append("剛剛沒能整理這段話，原文已保留；請直接回答下面這一題 (｡･ω･｡)。")
     lookup = {row["id"]: {**row, "step": step if row["id"] == current["id"] else None} for row in sources}
@@ -310,7 +337,7 @@ async def collect_setup(bot, user, text, event, *, editing=False):
                 raise ValueError("同一來源的設定不一致")
             entry = validate_change(change, lookup)
         except ValueError:
-            warnings.append("有一項答案的意思還不夠明確，這一項沒有修改；其他有效答案會保留。")
+            warnings.append("有一項答案的意思還不夠明確，這一項沒有修改；其他有效答案會保留。" + INVALID_HINTS.get(change.key, "請明確說出稱呼或口吻。"))
             continue
         old = draft.get(change.key)
         if old and (old["source_message_id"] or current["id"]) > change.source_message_id:
@@ -321,11 +348,13 @@ async def collect_setup(bot, user, text, event, *, editing=False):
         if change.key in PREFERENCE_LABELS:
             draft["_preferences_answered"] = True
     if editing and updated and setup_step(draft) == "confirm":
-        return await commit_setup(bot, user, draft, editing=True)
+        return await commit_setup(bot, user, draft, editing=True) + ("\n" + "\n".join(dict.fromkeys(warnings)) if warnings else "")
     if not editing and setup_step(draft) == "confirm":
         draft.setdefault("alerts_enabled", {"value": True, "source_message_id": None, "quote": ""})
-    await bot.db.execute("UPDATE users SET setup_step=?,setup_data=? WHERE id=?", ("done" if editing else setup_step(draft), dumps(draft), user["id"]))
     if editing and not updated and setup_step(draft) == "confirm":
-        return "沒有變更設定，請明確說要修改的項目，例如「晨報時間改成早上八點半」。\n" + setup_summary(draft)
+        draft.pop("_editing", None)
+        await bot.db.execute("UPDATE users SET setup_data=? WHERE id=?", (dumps(draft), user["id"]))
+        return "沒有變更設定，請明確說要修改的項目，例如「晨報時間改成早上八點半」。\n" + setup_summary(draft) + ("\n" + "\n".join(dict.fromkeys(warnings)) if warnings else "")
+    await bot.db.execute("UPDATE users SET setup_step=?,setup_data=? WHERE id=?", ("done" if editing else setup_step(draft), dumps(draft), user["id"]))
     note = "已更新答案 (｡•̀ᴗ-)✧。" if updated else ""
     return setup_reply(draft, "\n".join(dict.fromkeys(([note] if note else []) + warnings)))

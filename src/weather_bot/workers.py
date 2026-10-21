@@ -16,7 +16,7 @@ from weather_bot.controller import process_chat, receive
 from weather_bot.db import Database, dumps
 from weather_bot.line_io import LineSender, message_payload
 from weather_bot.memory import MemoryService
-from weather_bot.weather import WeatherService, is_night, merge_rain, parse_time
+from weather_bot.weather import WeatherService, forecast_changes, is_night, merge_rain, parse_time
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class Bot:
                     key = f"morning:{uid}:{target.date()}"
                     payload = {"target": target.isoformat(), "location_code": user["location_code"]}
                     await self.db.job("morning", uid, key, payload, epoch, deadline=(target + timedelta(minutes=20)).timestamp())
-                    await self.db.execute("UPDATE jobs SET payload=?,status='pending',attempts=0,run_at=?,deadline=? WHERE business_key=? AND status!='running' AND payload!=?",
+                    await self.db.execute("UPDATE jobs SET payload=?,status='pending',attempts=0,run_at=?,deadline=? WHERE business_key=? AND status!='running' AND (payload!=? OR EXISTS (SELECT 1 FROM outbox WHERE outbox.business_key=jobs.business_key AND outbox.status='cancelled' AND outbox.attempts=0))",
                         (dumps(payload), epoch, (target + timedelta(minutes=20)).timestamp(), key, dumps(payload)))
             await self.queue_memory(uid)
             latest = await self.db.one("SELECT MAX(created_at) AS time FROM messages WHERE user_id=? AND role='assistant' AND kind='chat'", (uid,))
@@ -152,7 +152,8 @@ class Bot:
             await asyncio.sleep(1)
 
     async def run_background(self):
-        rows = await self.db.all("SELECT * FROM jobs WHERE kind!='chat' AND status='pending' AND run_at<=? ORDER BY CASE kind WHEN 'morning' THEN 0 WHEN 'weather' THEN 1 WHEN 'compact' THEN 2 ELSE 3 END,id", (self.clock.now().timestamp(),))
+        await self.prepare_weather_changes()
+        rows = await self.db.all("SELECT * FROM jobs WHERE kind NOT IN ('chat','weather_change') AND status='pending' AND run_at<=? ORDER BY CASE kind WHEN 'morning' THEN 0 WHEN 'weather' THEN 1 WHEN 'compact' THEN 2 ELSE 3 END,id", (self.clock.now().timestamp(),))
         for row in rows:
             now = self.clock.now().timestamp()
             if row["deadline"] and now > row["deadline"]:
@@ -171,6 +172,7 @@ class Bot:
             except Exception as exc:
                 attempts = row["attempts"] + 1
                 await self.db.execute("UPDATE jobs SET status=?,run_at=?,error=? WHERE id=?", ("failed" if attempts >= 3 else "pending", now + 30 * attempts, type(exc).__name__, row["id"]))
+        await self.prepare_weather_changes()
 
     async def push_budget(self, *, extra=False):
         now = self.clock.now()
@@ -238,8 +240,18 @@ class Bot:
                      and f"{parse_time(p['valid_from']):%m-%d %H:%M}至{parse_time(p['valid_to']):%H:%M}" in "".join(reply.sentences)]
         if mode == "weather_alert":
             mentioned = periods
+        notified = []
+        if mode == "weather_alert":
+            notified = [{"valid_from": p["valid_from"], "valid_to": p["valid_to"],
+                         **{k: p[k] for k in p.get("changes", {})}} for p in periods]
+        elif periods:
+            first = periods[0]
+            afternoon = next((p for p in periods if parse_time(p["valid_from"]).hour >= 12 and parse_time(p["valid_from"]).date() == at.date()), first)
+            notified = [{"valid_from": first["valid_from"], "valid_to": first["valid_to"], "weather_code": first["weather_code"], "temperature": first["temperature"]},
+                        {"valid_from": afternoon["valid_from"], "valid_to": afternoon["valid_to"], "pop_3h": afternoon["pop_3h"]}]
         metadata = {"location_code": user["location_code"], "wake_time": user["wake_time"], "periods": merge_rain(mentioned),
-                    "choices": [c.model_dump() for c in reply.choices], "choice_set_id": choice_id}
+                    "forecast_hash": weather.get("forecast_hash") if weather else None,
+                    "notified": notified, "choices": [c.model_dump() for c in reply.choices], "choice_set_id": choice_id}
         await self.db.execute("""INSERT INTO outbox(user_id,business_key,kind,method,payload,retry_key,weather,memory_ids,send_at,expires_at) VALUES (?,?,?,'push',?,?,?,?,?,?)
             ON CONFLICT(business_key) DO UPDATE SET payload=excluded.payload,retry_key=excluded.retry_key,weather=excluded.weather,
             memory_ids=excluded.memory_ids,send_at=excluded.send_at,expires_at=excluded.expires_at,status='pending'
@@ -255,27 +267,58 @@ class Bot:
                 return False
         elif now.strftime("%H:%M") < user["wake_time"]:
             return False
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        daily = await self.db.one("SELECT id FROM outbox WHERE user_id=? AND kind='weather_alert' AND send_at>=? AND status IN ('pending','sending','sent')", (user["id"], start))
-        return daily is None and await self.push_budget(extra=True)
+        return await self.push_budget(extra=True)
 
     async def poll_weather(self, dataset, city):
-        weather, candidates = await self.weather.refresh(dataset, city)
-        if not candidates:
-            return
-        users = await self.db.all("SELECT * FROM users WHERE dataset=? AND city=? AND setup_step='done'", (dataset, city))
-        for user in users:
+        await self.weather.refresh(dataset, city)
+        await self.prepare_weather_changes()
+
+    async def prepare_weather_changes(self):
+        """安靜時段／配額不足保留工作；可發送時合併為目前仍有效的差異。"""
+        rows = await self.db.all("SELECT * FROM jobs WHERE kind='weather_change' AND status='pending' ORDER BY id")
+        groups = {}
+        for row in rows:
+            groups.setdefault(row["user_id"], []).append(row)
+        for uid, pending in groups.items():
+            if all(row["run_at"] > self.clock.now().timestamp() for row in pending):
+                continue
+            user = await self.db.one("SELECT * FROM users WHERE id=?", (uid,))
+            valid = [r for r in pending if json.loads(r["payload"])["weather"]["location_code"] == user["location_code"]]
+            for row in pending:
+                if row not in valid or not user["active"] or not user["alerts_enabled"] or user["setup_step"] != "done":
+                    await self.finish_job(row["id"], "cancelled", "settings_changed")
+            if not valid or not user["active"] or not user["alerts_enabled"] or user["setup_step"] != "done":
+                continue
             if not await self.alert_allowed(user):
+                for row in valid:
+                    await self.db.execute("UPDATE jobs SET error='deferred_quiet_or_quota',run_at=? WHERE id=?", (self.clock.now().timestamp() + 60, row["id"]))
                 continue
-            previous = await self.db.all("SELECT weather FROM outbox WHERE user_id=? AND status='sent' AND method='push' AND expires_at>?", (user["id"], self.clock.now().timestamp() - 86400))
-            informed = [p for row in previous if json.loads(row["weather"]).get("location_code") == user["location_code"] for p in json.loads(row["weather"]).get("periods", [])]
-            relevant = [p for p in candidates if not any(p["valid_from"] >= old["valid_from"] and p["valid_to"] <= old["valid_to"] for old in informed)]
-            if not relevant:
-                continue
-            current = {**weather, "periods": relevant}
-            now = self.clock.now().timestamp()
-            expires = min(now + 1800, min(parse_time(p["valid_to"]).timestamp() for p in relevant))
-            await self.prepare_push(user, f"alert:{user['id']}:{self.clock.now().date()}", "weather_alert", current, now, expires)
+            before = json.loads(valid[0]["payload"])["before"]
+            weather = json.loads(valid[-1]["payload"])["weather"]
+            changes = forecast_changes(before, weather, self.clock.now())
+            notices = await self.db.all("SELECT weather FROM outbox WHERE user_id=? AND method='push' AND status='sent' ORDER BY sent_at DESC,id DESC", (uid,))
+            known = {}
+            for notice in notices:
+                data = json.loads(notice["weather"])
+                if data.get("location_code") == user["location_code"]:
+                    for period in data.get("notified", []):
+                        for field in ("weather_code", "temperature", "apparent_temperature", "pop_3h"):
+                            if field in period:
+                                known.setdefault((period["valid_from"], period["valid_to"], field), period[field])
+            relevant = []
+            for period in changes:
+                remaining = {k: v for k, v in period["changes"].items()
+                             if known.get((period["valid_from"], period["valid_to"], k)) != period[k]}
+                if remaining:
+                    relevant.append({**period, "changes": remaining})
+            if relevant:
+                now = self.clock.now().timestamp()
+                await self.prepare_push(user, valid[-1]["business_key"], "weather_alert", {**weather, "periods": relevant}, now,
+                                        max(parse_time(p["valid_to"]).timestamp() for p in relevant))
+                # 合併後保留真正的比較基準，重算尚未發送的內容時不能丟掉較早的變更。
+                await self.db.execute("UPDATE jobs SET payload=? WHERE id=?", (dumps({"before": before, "weather": weather}), valid[-1]["id"]))
+            for row in valid:
+                await self.finish_job(row["id"], "done", None if relevant else "no_uninformed_change")
 
     async def send_due(self):
         now = self.clock.now().timestamp()
@@ -283,15 +326,34 @@ class Bot:
         for row in rows:
             user = await self.db.one("SELECT * FROM users WHERE id=?", (row["user_id"],))
             metadata = json.loads(row["weather"])
-            allowed = user["active"] and row["expires_at"] > now and metadata["location_code"] == user["location_code"]
+            if row["kind"] == "weather_alert" and row["attempts"] == 0:
+                newer = await self.db.one("SELECT id FROM jobs WHERE user_id=? AND kind='weather_change' AND status='pending' AND business_key!=? AND json_extract(payload,'$.weather.location_code')=? LIMIT 1",
+                                          (row["user_id"], row["business_key"], metadata["location_code"]))
+                original = await self.db.one("SELECT id FROM jobs WHERE business_key=? AND kind='weather_change'", (row["business_key"],))
+                if newer and original:
+                    # 尚未嘗試送出的舊內容可與後續變更重算；已嘗試者保留原 retry key 與 payload。
+                    async with self.db.transaction() as conn:
+                        await conn.execute("UPDATE outbox SET status='cancelled',error='superseded' WHERE id=?", (row["id"],))
+                        await conn.execute("UPDATE jobs SET status='pending',run_at=?,error=NULL WHERE id=?", (now, original["id"]))
+                    continue
+                expired_period = any(parse_time(p["valid_to"]).timestamp() <= now for p in metadata.get("notified", []))
+                if original and expired_period and row["expires_at"] > now:
+                    async with self.db.transaction() as conn:
+                        await conn.execute("UPDATE outbox SET status='cancelled',error='forecast_period_expired' WHERE id=?", (row["id"],))
+                        await conn.execute("UPDATE jobs SET status='pending',run_at=?,error=NULL WHERE id=?", (now, original["id"]))
+                    continue
+            allowed = user["active"] and user["setup_step"] == "done" and row["expires_at"] > now and metadata["location_code"] == user["location_code"]
             if row["kind"] == "morning_brief":
                 allowed = allowed and user["morning_enabled"] and metadata["wake_time"] == user["wake_time"]
             else:
                 local = self.clock.now()
                 awake = user["night_forecast_enabled"] if is_night(local) else local.strftime("%H:%M") >= user["wake_time"]
-                allowed = allowed and user["alerts_enabled"] and awake
+                allowed = allowed and user["alerts_enabled"]
+                if allowed and not awake:
+                    await self.db.execute("UPDATE outbox SET send_at=?,error='quiet_hours' WHERE id=?", (now + 60, row["id"]))
+                    continue
             if not allowed:
-                await self.db.execute("UPDATE outbox SET status='cancelled' WHERE id=?", (row["id"],))
+                await self.db.execute("UPDATE outbox SET status='cancelled',error=? WHERE id=?", ("expired" if row["expires_at"] <= now else "settings_changed", row["id"]))
                 continue
             await self.db.execute("UPDATE outbox SET status='sending',attempts=attempts+1 WHERE id=?", (row["id"],))
             try:

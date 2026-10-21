@@ -58,6 +58,19 @@ def weather_facts(user, weather, mode, now):
     first = periods[0]
     if mode == "weather_alert":
         intervals = "、".join(f"{parse_time(p['valid_from']):%m-%d %H:%M}至{parse_time(p['valid_to']):%H:%M}" for p in merge_rain(periods))
+        changed = [p for p in periods if p.get("changes")]
+        if changed:
+            labels = {"weather_code": ("天氣", ""), "temperature": ("氣溫", "°C"),
+                      "apparent_temperature": ("體感", "°C"), "pop_3h": ("降雨機率", "%")}
+            details = []
+            for key, (label, unit) in labels.items():
+                pairs = list(dict.fromkeys((p["changes"][key]["before"], p["changes"][key]["after"]) for p in changed if key in p["changes"]))
+                if pairs:
+                    before, after = pairs[0]
+                    show = lambda value: f"{value:g}" if isinstance(value, (int, float)) else str(value)
+                    details.append(f"{label}{show(before)}{unit}改為{show(after)}{unit}" + (f"等{len(pairs)}種變更" if len(pairs) > 1 else ""))
+            return [f"{user['city']}{parse_time(changed[0]['valid_from']):%m-%d %H:%M}至{parse_time(changed[-1]['valid_to']):%m-%d %H:%M}內有{len(changed)}個預報時段變更",
+                    "其中" + "、".join(details), "各時段可能不同，請依最新預報安排穿著與雨具 (｡･ω･｡)"]
         known = [p["pop_3h"] for p in periods if p["pop_3h"] is not None]
         pop = f"降雨機率{min(known):g}%至{max(known):g}%" if known else "降雨機率資料不足"
         return [f"{city}{intervals}的預報新增降雨風險", f"{pop}，出門請備妥雨具"]

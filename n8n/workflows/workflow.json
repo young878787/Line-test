@@ -188,7 +188,7 @@
           ]
         }
       },
-      "disabled": false
+      "disabled": true
     },
     {
       "id": "4275038e-3b4d-4a1f-b1a4-3224663f8912",
@@ -395,7 +395,7 @@
     "timezone": "Asia/Taipei",
     "saveManualExecutions": true,
     "saveDataErrorExecution": "all",
-    "saveDataSuccessExecution": "none",
+    "saveDataSuccessExecution": "all",
     "executionTimeout": 300
   },
   "description": "LINE 原文入庫後 ACK；天氣地區必填全臺22縣市，使用F-D0047-089縣市級預報；逐題引導、口語更正與聊天共用業務核心；晨報、預報變更、夜間延後及 outbox 重試由背景排程完成。",

@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 
 from conftest import configured
-from weather_bot.weather import normalize, rain_candidates, is_night
+from weather_bot.weather import normalize, forecast_changes, is_night
 
 
 async def test_T01_adapter_time_alignment_null_and_same_version_zero_ai(bot, raw_weather):
@@ -20,17 +20,17 @@ async def test_T01_adapter_time_alignment_null_and_same_version_zero_ai(bot, raw
     assert len(await bot.db.all("SELECT * FROM weather_snapshots")) == 1
 
 
-def test_same_hash_fetched_noise_and_cloud_not_rain(raw_weather, bot):
+def test_same_hash_fetched_noise_and_all_forecast_changes(raw_weather, bot):
     old = normalize(raw_weather, "新北市", "F-D0047-089", bot.clock.now())
     same = normalize(raw_weather, "新北市", "F-D0047-089", bot.clock.now() + timedelta(minutes=5))
     assert old["forecast_hash"] == same["forecast_hash"]
     new = deepcopy(old)
     new["periods"][0].update(weather_code=7, weather="陰天")
-    assert rain_candidates(old, new, bot.clock.now()) == []
+    assert len(forecast_changes(old, new, bot.clock.now())) == 1
     new["periods"][0].update(weather_code=8, rain_state="rain")
-    assert len(rain_candidates(old, new, bot.clock.now())) == 1
+    assert len(forecast_changes(old, new, bot.clock.now())) == 1
     new["periods"][0]["valid_from"] = "2026-10-21T09:30:00+08:00"
-    assert rain_candidates(old, new, bot.clock.now()) == []
+    assert forecast_changes(old, new, bot.clock.now()) == []
 
 
 def test_incomplete_and_expired_are_rejected(raw_weather, bot):
@@ -39,7 +39,7 @@ def test_incomplete_and_expired_are_rejected(raw_weather, bot):
         normalize(raw_weather, "新北市", "F-D0047-089", bot.clock.now())
 
 
-async def test_night_toggle_daily_limit_and_retry_same_payload(bot, raw_weather):
+async def test_night_toggle_no_daily_limit_and_retry_same_payload(bot, raw_weather):
     user = await configured(bot)
     bot.clock.value = bot.clock.value.replace(hour=23, minute=40)
     assert is_night(bot.clock.now())
@@ -49,7 +49,7 @@ async def test_night_toggle_daily_limit_and_retry_same_payload(bot, raw_weather)
     assert await bot.alert_allowed(user)
     weather = await bot.weather.get_weather(user)
     await bot.prepare_push(user, "alert-test", "weather_alert", weather, bot.clock.now().timestamp(), bot.clock.now().timestamp()+1800)
-    assert not await bot.alert_allowed(user)
+    assert await bot.alert_allowed(user)
     calls = len(bot.model.calls)
     bot.line.push_failures = 1
     await bot.send_due()

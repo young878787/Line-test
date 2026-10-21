@@ -69,8 +69,8 @@ async def setting(bot, user, text, event):
         return "設定已更新。\n" + setup_summary(await current_draft(bot, await bot.db.one("SELECT * FROM users WHERE id=?", (uid,))))
     setting_request = re.search(
         r"(?:修改|更正).{0,8}(?:地區|縣市|時間|晨報|夜間|稱呼|口吻)|(?:地區|縣市|時間|晨報|夜間|稱呼|口吻).{0,8}(?:改|開|關)"
-        r"|改住|搬到|(?:開啟|關閉)(?:晨報|夜間提醒)|^(?:請)?(?:叫我|稱呼我|以後叫我)|夜間也提醒|起床後再提醒"
-        r"|晨報.*(?:要|不要|不用)|夜間.*(?:要|不要|不用)", text)
+        r"|改住|搬到|(?:開啟|關閉)(?:晨報|夜間提醒)|^(?:請)?(?:叫我|改叫我|稱呼我|以後叫我)|夜間也提醒|起床後再提醒"
+        r"|晨報.*(?:要|不要|不用|可以)|夜間.*(?:要|不要|不用|可以)", text)
     if initial_draft(user).get("_editing") or (setting_request and not re.search(r"[？?]|怎麼|如何", text)):
         return await collect_setup(bot, user, text, event, editing=True)
     return None

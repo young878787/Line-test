@@ -300,7 +300,7 @@ class WorkflowTests(unittest.TestCase):
         alerts = [r for r in state["tables"]["outbox"] if r["kind"] == "weather_alert"]
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["status"], "sent")
-        self.assertIn("新增降雨風險", state["pushes"][0]["payload"]["messages"][0]["text"])
+        self.assertIn("預報時段變更", state["pushes"][0]["payload"]["messages"][0]["text"])
         self.assertEqual(len(self.background()["pushes"]), 1)
 
     def test_25_push_retry_keeps_the_same_idempotency_key(self):
@@ -335,7 +335,7 @@ class WorkflowTests(unittest.TestCase):
     def test_27_schedule_recovers_persisted_pending_chat(self):
         # 模擬已 ACK 入庫，原 n8n 執行卻未繼續處理；只能由每秒補跑領取。
         self.persist_without_processing()
-        state = self.wait_for(lambda s: bool(s["replies"]), timeout=5)
+        state = self.wait_for(lambda s: bool(s["replies"]) and s["tables"]["jobs"][0]["status"] == "done", timeout=5)
         self.assertEqual(len(state["replies"]), 1)
         self.assertEqual(state["tables"]["jobs"][0]["status"], "done")
 
@@ -376,6 +376,55 @@ class WorkflowTests(unittest.TestCase):
         text = state["replies"][-1]["payload"]["messages"][0]["text"]
         self.assertIn("嘉義縣", text)
         self.assertIn("嘉義市", text)
+
+    def test_31_short_answers_and_completed_corrections(self):
+        for text in ("澎湖縣", "早上七點半", "要", "不要", "先跳過", "確認開始"):
+            state = self.chat(text)
+        user = state["tables"]["users"][0]
+        self.assertEqual((user["city"], user["wake_time"], user["morning_enabled"], user["alerts_enabled"], user["night_forecast_enabled"]),
+                         ("澎湖縣", "07:30", 1, 1, 0))
+        for text in ("晨報時間改成早上八點半", "改住臺中市", "叫我阿洋"):
+            state = self.chat(text)
+        user = state["tables"]["users"][0]
+        self.assertEqual((user["city"], user["wake_time"], user["setup_step"]), ("臺中市", "08:30", "done"))
+        self.assertEqual(state["tables"]["memories"][0]["value"], "阿洋")
+        for text, enabled in (("夜間還是可以提醒我", 1), ("夜間不可以提醒我", 0)):
+            state = self.chat(text)
+            self.assertEqual(state["tables"]["users"][0]["night_forecast_enabled"], enabled)
+        state = self.chat("改叫我小洋")
+        self.assertEqual(state["tables"]["memories"][0]["value"], "小洋")
+        state = self.chat("今天好累")
+        self.assertEqual(state["tables"]["outbox"][-1]["kind"], "chat")
+        self.assertEqual(state["external_network_calls"], 0)
+
+    def test_32_same_day_forecast_changes_are_not_limited_to_one(self):
+        self.configured()
+        self.chat("關閉晨報")
+        self.chat("今天天氣如何？")
+        self.control(weather_rain=True, advance_seconds=3000)
+        self.background()
+        self.control(weather_rain=False, advance_seconds=3600)
+        state = self.background()
+        self.assertEqual(len(state["pushes"]), 2)
+        self.assertEqual(len({r["retry_key"] for r in state["pushes"]}), 2)
+        self.assertTrue(all(r["status"] == "done" for r in state["tables"]["jobs"] if r["kind"] == "weather_change"))
+
+    def test_33_night_deferral_survives_until_wake(self):
+        self.configured()
+        self.chat("關閉晨報")
+        self.chat("今天天氣如何？")
+        self.control(weather_rain=True, advance_seconds=16 * 3600 + 50 * 60)
+        state = self.background()
+        self.assertEqual(state["pushes"], [])
+        deferred = [r for r in state["tables"]["jobs"] if r["kind"] == "weather_change"]
+        self.assertEqual(len(deferred), 1)
+        self.assertEqual(deferred[0]["status"], "pending")
+        self.control(advance_seconds=7 * 3600 + 20 * 60)
+        state = self.background()
+        self.assertEqual(len(state["pushes"]), 1)
+        response = self.finish_background(self.start_background())
+        self.assertIn("jobs", response)
+        self.assertIn("notices", response)
 
     @classmethod
     def tearDownClass(cls):

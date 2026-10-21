@@ -2,6 +2,8 @@
 
 以 **一個 n8n workflow＋業務 adapter** 接替原本 `weather_bot.main` 的服務入口。Webhook、聊天補跑、每秒背景排程與錯誤處理放在同一個 workflow；聊天、天氣、記憶與 SQLite 契約由 adapter 重用。
 
+新手流程為「縣市→起床／晨報時間→晨報→夜間→偏好或跳過→確認開始」，完成後可口語更正。白天預報變更自動提醒；夜間延後與配額不足保存在 SQLite 工作中，晨報只消除已明確顯示的變更。`Weather Outbox and Memory` 的 execution 輸出包含 `jobs`、`notices` 狀態統計，HTTP 成功不代表所有訊息已送達；完整業務案例見根目錄 `tests/test_setup_notifications.py` 及 `n8n/tests/test_workflows.py`。
+
 從 `D:\Line-test` 啟動，指令會持續執行：
 
 ```powershell
