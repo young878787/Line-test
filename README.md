@@ -1,83 +1,133 @@
 ﻿# LINE Weather Galgame Bot
 
-目前以 [n8n 常駐服務](n8n/README.md) 為主要入口，重用 Python 業務核心與 SQLite，提供 LINE 角色聊天、全臺 22 縣市天氣問答、每日六句晨報、預報變更提醒與背景記憶。地區維持必填，只需有效縣市，不必提供行政區；詳見 [縣市預報與設定](n8n/docs/縣市預報與設定.md)。
+結合天氣提醒與個人化 AI 聊天的 LINE 助理：少一點每天查預報的麻煩，多一個提醒你帶傘、也能陪你聊天的角色。
 
-完整檔案架構、資料流及驗證結果見 [實作架構與驗證](docs/實作架構與驗證.md)；需求見 [原始計畫](docs/LINE_Weather_Galgame_Bot_Plan.md)。
+本專案從 Python 版本開始，之後透過 Skills 與 MCP 輔助整合成 n8n 版本。目前以 **n8n 編排流程、Python 執行業務邏輯、SQLite 保存資料**，提供新手引導、天氣查詢、預報變更提醒、聊天記憶與 LINE Quick Reply。
 
-## 啟動
+簡潔的作品說明可直接閱讀 [專案介紹](docs/專案介紹.md)。
+
+## 專案背景與想解決的問題
+
+這個作品的起點很生活化：每天主動查天氣很麻煩，有時早上看起來不會下雨，午餐出門就忘記帶傘，結果在路上淋雨；即使早上看過預報，也不一定會注意到後續變化。
+
+因此，我想讓天氣資訊主動出現在平常使用的 LINE 裡，整理當天預報，並在預報改變時提醒帶傘。剛好也在嘗試 AI 聊天，便加入個人化口吻、記憶更新與新手設定，讓它成為有互動感的日常助理。
+
+## 目前可以做什麼
+
+| 功能 | 使用者能獲得的體驗 |
+|---|---|
+| 新手引導 | 逐步設定縣市、起床／晨報時間、晨報與夜間提醒開關，以及稱呼或聊天口吻；確認後開始使用 |
+| 全臺天氣查詢 | 支援全臺 22 縣市，包含澎湖、金門與連江；可以詢問其他縣市，不會因此改掉原本的提醒地區 |
+| 晨報與預報變更提醒 | 整理天氣、氣溫、體感與降雨機率；預報有變化時主動通知，協助判斷是否帶傘或調整外出準備 |
+| 個人化聊天 | 結合近期對話、使用者設定與已保存的偏好回覆，可更改稱呼及溫柔、元氣、淡定等支援的口吻 |
+| 背景記憶更新 | 整理使用者明確提供的偏好與資訊，供後續對話使用，並支援更正與忘記 |
+| Quick Reply 選項 | 一般聊天每輪提供三個接話選項，像 Galgame 一樣點選回覆，也能隨時自由輸入文字 |
+
+天氣資料來自中央氣象署，提醒以設定縣市的預報與定期更新為依據。目前提供縣市級資訊，尚未提供沿途定位或即時降雨偵測。
+
+## 使用流程
+
+1. **完成初始設定**：加入 LINE 好友後，依引導提供縣市、時間與通知選擇。偏好可以先跳過；資料收齊後仍須明確回覆「確認開始」。
+2. **查天氣或聊天**：例如「臺中市今天會下雨嗎？」或直接聊日常，也可以點選回覆下方的 Quick Reply。
+3. **接收主動提醒**：依設定收到晨報與預報變更通知。尚未起床或關閉夜間提醒時，系統會依規則延後通知。
+4. **隨時調整設定**：例如「晨報時間改成早上八點半」「改住澎湖縣」「叫我阿洋」，或告訴它希望使用支援的聊天口吻。
+
+初次設定可以一次說「我住新北市，早上 7:30 起床，叫我海鹽布丁，口吻溫柔一點」，也能分次提供。未填完的有效答案會保留，完成引導前優先處理設定。
+
+輸入 `設定` 可查看目前內容；也支援 `修改地區`、`修改起床時間`、`開啟晨報`／`關閉晨報`、`開啟天氣提醒`／`關閉天氣提醒`、`開啟夜間提醒`／`關閉夜間提醒`。
+
+## 做法與開發過程
+
+先以 Python 建立聊天、天氣、記憶、新手引導與測試基準，再透過 Skills 提供操作指引、MCP 輔助建立與驗證 n8n workflow，將觸發、排程、HTTP 呼叫與錯誤處理整合到可視化流程。
+
+目前的資料流為：
+
+```text
+LINE → Cloudflare Quick Tunnel → 公開 gateway → n8n workflow
+                                                ↓
+                                          Python adapter
+                                                ↓
+                                     SQLite／氣象署／AI／LINE
+```
+
+- **n8n**：以單一 workflow 處理收件、聊天工作、背景排程與錯誤路徑。
+- **Python**：沿用既有業務核心，負責設定、預報比較、聊天與記憶驗證，以及 LINE 傳送。
+- **SQLite**：保存使用者設定、對話、記憶、預報與待處理工作，讓流程可在重啟後繼續。
+- **AI**：將既有天氣資料轉成易讀文字、生成聊天與接話選項，並提出記憶更新；程式負責檢查格式與來源。
+
+n8n 版本仍依賴 Python adapter，匯入 workflow JSON 後還需要搭配服務環境。主要入口為 [`n8n/service.py`](n8n/service.py)，流程生成來源為 [`n8n/scripts/build_workflows.py`](n8n/scripts/build_workflows.py)。
+
+## 執行與開發
+
+### 準備環境
+
+使用 Python 3.11 以上與 uv。n8n 版本另需 Node.js 22.22 以上、全域 `n8n@2.35.7` 與 cloudflared；環境說明見 [n8n README](n8n/README.md)。
+
+從專案根目錄執行；已有 `.env` 時保留原檔，只補齊設定：
 
 ```powershell
 uv sync --locked --group dev
-Copy-Item .env.example .env
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_cloudflared.ps1
 ```
 
-已有 `.env` 時直接補齊缺少的設定，不要覆蓋原檔。必要設定：
+依 [環境變數範本](.env.example) 設定：
 
-```dotenv
-CWA_API_KEY=
-LINE_CHANNEL_ACCESS_TOKEN=
-LINE_CHANNEL_SECRET=
-AI_API_Keys=
-AI_API_URL=https://chatapi.ntubimdbirc.tw
-AI_MODEL=BIRC-LLM
-LINE_MONTHLY_LIMIT=200
-DATABASE_PATH=bot.sqlite3
-LOCAL_TUNNEL_ENABLED=true
-```
+| 設定 | 用途 |
+|---|---|
+| `CWA_API_KEY` | 中央氣象署資料授權 |
+| `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET` | LINE 傳送與 webhook 驗簽 |
+| `AI_API_Keys`、`AI_API_URL`、`AI_MODEL` | AI Bearer token、API 網址與模型；模型須支援 JSON Schema 結構化輸出 |
+| `LINE_MONTHLY_LIMIT`、`DATABASE_PATH` | 推播配額控制與業務資料庫位置 |
 
-`AI_API_Keys` 為單一 Bearer token。AI URL 可填根網址、`/v1` 或完整 `/v1/chat/completions`。模型須支援 JSON Schema 結構化輸出；thinking 固定關閉。聊天整體處理期限為 25 秒，LINE 回覆期限為 55 秒；模型失敗使用短備援，記憶工作另行執行。
+`.env`、正式 SQLite、`n8n/.runtime/` 及日誌皆為本機資料，不納入版控。
+
+### 啟動目前的 n8n 版本
 
 ```powershell
-uv run python -m weather_bot.main
+uv run python n8n/service.py
 ```
 
-服務獨占 `127.0.0.1:18567`，LINE webhook 為 `/webhook`，健康檢查為 `/health`。原啟動指令會一起啟動 Cloudflare Quick Tunnel，使用臨時 HTTPS 網址，不需購買網域或登入 Cloudflare。Windows 安裝腳本從官方 release 下載固定版本並檢查 SHA-256，執行檔保存在忽略版控的 `.tools`；其他平台可將官方 `cloudflared` 放入 PATH。
+正式模式會沿用業務資料庫、建立公開 HTTPS，並驗證及同步真實 LINE webhook。先停止舊 Python 服務，再啟動此入口；終端機需保持運行，在 LINE Developers 開啟 **Use webhook**。
 
-請在 LINE Developers 開啟 **Use webhook**。程序會先驗證公開 `/health`、有效與無效簽章，再讓 LINE 測試候選網址；通過後自動更新 webhook 並確認回讀。每次重啟都會同步新的 `https://….trycloudflare.com/webhook`，不必手動複製。LINE 設定可能快取最多一分鐘；以 `logs/service/latest.json` 的 `status: ready` 與 `checks` 判斷是否就緒。詳細隧道日誌固定為 `logs/service/cloudflared.log`，重啟驗證結果為 `logs/service/restart_test.json`。
+編輯介面為 <http://127.0.0.1:5680>。查看 `n8n/.runtime/service.json`，待 `status: ready` 且 `checks.endpoint_matches: true` 後，再進行 LINE 實測。按 `Ctrl+C` 停止。
 
-保持啟動視窗運行，按 `Ctrl+C` 可停止服務與隧道；再次執行相同啟動指令即可重開。隧道子程序退出時會在 60 秒後重建並同步新網址，驗證或 API 失敗也會記錄原因並重試。若 `18567` 已被佔用，啟動會直接失敗，不更動 LINE 設定。電腦休眠、關機或服務停止期間無法接收訊息。[Quick Tunnel](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/) 是測試用臨時服務，沒有可用性保證。
+僅使用隔離資料與模擬外部 API 時：
 
-已有固定 HTTPS 反向代理時，可設 `LOCAL_TUNNEL_ENABLED=false`；使用持久磁碟並維持單一程序、單一 Web worker。反向代理不得改寫驗簽所用的原始 body。僅透過 `python -m weather_bot.main` 啟動才自動管理本機隧道，匯入 ASGI app 與 CI 不會啟動隧道或改動 LINE 設定。
+```powershell
+uv run python n8n/service.py --mock
+```
 
-正式資料庫預設為專案根目錄的 `bot.sqlite3`，服務啟動時建立七張表。相對 `DATABASE_PATH` 一律以專案根目錄解析。此檔案與 WAL／SHM 不納入版控；不要將 CI 資料庫當作正式資料庫。
+Mock 模式仍會初始化／更新專用 n8n 與 workflow，但不建立公開隧道、不更新真實 LINE endpoint。完整操作與切換方式見 [使用與驗證](n8n/docs/使用與驗證.md)。
 
-加入 LINE 好友後提供必填縣市（例如 `臺中市`）、起床時間（例如 `07:00`）、晨報與夜間提醒選擇，再提供偏好或回覆 `先跳過`，最後回覆 `確認開始`。可一次說「我住新北市，早上 7.30 起床，叫我海鹽布丁，口吻溫柔一點」，也可分次提供；只提供有效縣市即可繼續，不追問行政區。`嘉義`、`新竹` 須說明是縣或市，缺少有效縣市不能完成設定。確認前可直接補充或更正，其他有效答案會保留。
+## 成果與驗證
 
-尚未完成新手引導時，文字、數字、舊按鈕或貼圖一律優先進入引導流程。一般輸入透過 LINE Reply 回覆目前設定與下一題。標準格式直接解析，自然語句只呼叫設定抽取 AI，檢查逐字來源、通知種類與開關及有效縣市；不進行一般 AI 聊天、不推播。資料收齊仍須明確確認，才把正式設定與明確說出的初始偏好一起儲存並開放聊天。偏好可跳過，不猜稱呼、口吻或其他習慣。
+目前已串起「初始設定 → 天氣整理與提醒 → 個人化聊天 → 記憶更新」的使用流程，並提供按鈕選項與自由輸入兩種互動方式。
 
-LINE 原文在接收時與工作一起入庫；引導草稿保存在 `users.setup_data`，重啟不遺失。地區、起床時間與通知仍以 `users` 正式欄位為準；初始稱呼、口吻、怕冷等寫入附來源的 `memories`。完成後 AI 上下文同時讀取正式設定與偏好。既有資料庫會自動加上草稿欄位，保留使用者及原訊息。舊版尚未完成且未解析的最近原文，會在下一則設定輸入時一併整理；不重用舊 Reply token。
+既有驗證紀錄涵蓋 Python 業務回歸、adapter 隔離測試、真實 n8n 引擎搭配 mock 業務，以及程序恢復與公開 HTTPS。各層測試範圍與結果見 [使用與驗證](n8n/docs/使用與驗證.md) 及 [縣市預報與設定](n8n/docs/縣市預報與設定.md)。
 
-每輪三個接話 action 由 AI 根據當前情境產生一小段使用者說得出口的文字。正文顯示完整段落，Quick Reply 按鈕使用短標籤，選取後顯示並送入相同的完整段落。只有錯誤備援與固定設定仍使用程式模板。
-
-固定設定命令：`設定`、`修改地區`、`修改起床時間`、`開啟晨報`、`關閉晨報`、`開啟天氣提醒`、`關閉天氣提醒`、`開啟夜間提醒`、`關閉夜間提醒`。
-
-完成後也可以直接說「晨報時間改成早上八點半」「改住澎湖縣」「叫我阿洋」；明確更正會立即更新正式設定，`設定` 只顯示目前內容，`取消修改` 可離開尚未填完的修改。一般聊天中的假設與提問不會當成設定。
-
-新使用者的白天預報變更自動提醒，只詢問晨報與夜間開關。每小時 `:40` 取得預報，將未來24小時相同時段的天氣、氣溫、體感及降雨機率變更建立成持久工作，同日不同變更仍會提醒。夜間關閉或尚未起床時延後，起床後合併仍有效的變更；晨報已明確告知的項目不重複提醒。額度不足保留待處理狀態，AI 失敗使用固定文字；LINE 傳送失敗與成功分別記錄在 outbox。
-
-舊的 `--now` 直接推播入口已由新服務與 outbox 取代；`sample/opencode.py` 不參與執行。
-
-## 測試與報告
+不需啟動 n8n 的測試入口：
 
 ```powershell
 uv run python -m pytest -q --junitxml=logs/ci/junit.xml
+uv run python n8n/tests/test_service.py
 ```
 
-一般測試不呼叫外部服務，使用 `logs/ci/databases/<案例名稱>.sqlite3`、固定天氣、可控制時鐘及模型／LINE mock。每案例固定保留最新資料庫，重跑只覆寫帶 CI 標記的測試產物；沒有 CI 標記的檔案會拒絕覆寫。報告固定覆寫 `logs/ci/latest.json`，包含資料庫路徑、每個案例狀態、Reply 實測秒數、單則訊息數量與記憶／工作證據。Reply mock 拒絕重用及逾期 token；另有慢記憶仍在執行時已完成回覆的測試。真實 API／模型驗證也使用此 CI 資料庫目錄，不寫入正式庫。
+第一條使用模型／LINE 等替身，報告固定為 `logs/ci/latest.json`；第二條驗證 adapter 與生命週期，報告為 `n8n/logs/service_tests.json`。根目錄 pytest 不會自動執行 `n8n/tests/`。
 
-```powershell
-uv run python -m pytest tests/live -q --live
-```
+真實 n8n 引擎、公開 HTTPS、真實 CWA／AI 與手機收訊分別驗證；mock 通過不能直接代表真實 LINE 業務或長時間運行已驗收。`tests/live` 需明確加上 `--live`，會呼叫實際 CWA／AI 並可能消耗額度，LINE 仍為 mock。
 
-真實驗證使用設定中的 CWA 與 BIRC；T01–T05 最多八次模型呼叫，T06 五輪聊天最多五次，T07 新手引導與確認後聊天最多三次，全套最多十六次。LINE 仍為 mock，不向使用者發訊。原本驗收輸出 `logs/live/latest.json`；五輪完整對話與 action 輸出 `logs/live/chat_five_turns.md`，T07 逐步引導與偏好使用輸出 `logs/live/onboarding.md`，機器判讀證據為同名 `.json`。缺少金鑰為 `NOT_RUN`，不當作通過。少量真實案例通過不代表完整語意品質或真實手機收訊驗收。
+## 未來方向
 
-只執行真實 AI 五輪聊天：
+下一步希望加入完整的聊天情緒系統：讓 AI 判斷每輪互動對角色情緒的影響，累積加分或減分，再反映到後續的語氣與回應，增加對話的連續性與角色感。
 
-```powershell
-uv run python -m pytest tests/live/test_chat_five_turns_live.py -q --live
-```
+目前已有聊天口吻與偏好設定，情緒分數及其對話機制尚未實作。
 
-一般 CI 也執行相同五輪入口與選項解析測試，使用模型替身，產物為 `logs/ci/chat_five_turns.md`／`.json`。手動真實驗證 job 會執行實際 BIRC 的五輪版本並上傳報告。
+## 延伸文件
 
-GitHub Actions 在 PR／主要分支 push 執行 Linux、Windows 測試；實際 CWA／模型驗證僅允許預設分支的手動觸發，需設定 `CWA_API_KEY`、`AI_API_KEYS`、`AI_API_URL`、`AI_MODEL` secrets。每次都上傳最新報告，失敗也保留結果。
+- [專案介紹](docs/專案介紹.md)：背景、問題、做法、成果與未來方向的簡潔書面版本。
+- [n8n README](n8n/README.md)：目前主要服務入口與環境需求。
+- [使用與驗證](n8n/docs/使用與驗證.md)：啟停、切換、測試範圍與證據位置。
+- [n8n 實作轉換分析](n8n/docs/實作轉換分析.md)：目前架構、資料流與執行邊界。
+- [縣市預報與設定](n8n/docs/縣市預報與設定.md)：22 縣市查詢與提醒地區的規則。
+- [Python 初版架構與驗證](docs/實作架構與驗證.md)、[原始計畫](docs/LINE_Weather_Galgame_Bot_Plan.md)：開發歷程參考；現行入口與地區支援以 n8n 文件及程式為準。
